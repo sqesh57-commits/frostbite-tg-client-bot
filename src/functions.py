@@ -400,9 +400,6 @@ class XUIAPI:
             return None
 
         try:
-            settings = self._loads_json(inbound.get("settings", "{}"), {})
-            clients = settings.get("clients", [])
-
             client_id = str(uuid.uuid4())
             email = f"user_{telegram_id}_{random.randint(1000, 9999)}"
             sub_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{telegram_id}"))
@@ -425,52 +422,15 @@ class XUIAPI:
             elif expiry_time > 2000000000:
                 new_client["expiryTime"] = 0
 
-            clients.append(new_client)
-            settings["clients"] = clients
-
-            # Sanity check: verify inbound is valid before overwrite
-            if inbound.get("protocol") != "vless":
-                logger.error(
-                    f"SAFETY ABORT: inbound {config.INBOUND_ID} protocol is "
-                    f"'{inbound.get('protocol')}', expected 'vless'. Skipping update."
-                )
-                return None
-            if not settings.get("clients"):
-                logger.error(
-                    f"SAFETY ABORT: inbound {config.INBOUND_ID} clients list is empty "
-                    f"after modification. Skipping update."
-                )
-                return None
-
-            logger.info(
-                f"Pre-update check: inbound {config.INBOUND_ID}, "
-                f"protocol={inbound.get('protocol')}, "
-                f"clients={len(settings['clients'])} "
-                f"(was {len(clients) - 1})"
-            )
-
-            update_data = {
-                "up": inbound["up"],
-                "down": inbound["down"],
-                "total": inbound["total"],
-                "remark": inbound["remark"],
-                "enable": inbound["enable"],
-                "expiryTime": inbound["expiryTime"],
-                "listen": inbound["listen"],
-                "port": inbound["port"],
-                "protocol": inbound["protocol"],
-                "settings": json.dumps(settings, indent=2),
-                "streamSettings": inbound["streamSettings"],
-                "sniffing": inbound["sniffing"],
-            }
-
-            if await self.update_inbound(config.INBOUND_ID, update_data):
+            # Use client-specific API instead of full inbound rewrite
+            if config.BOT_DRY_RUN:
+                logger.info(f"DRY RUN: Would create client {email} in inbound {config.INBOUND_ID}")
                 return {
                     "client_id": client_id,
                     "email": email,
                     "port": reality.get("port", inbound.get("port", 443)),
                     "security": "reality",
-                    "remark": inbound["remark"],
+                    "remark": inbound.get("remark", ""),
                     "sni": reality["sni"],
                     "pbk": reality["public_key"],
                     "fp": reality.get("fingerprint", config.REALITY_FINGERPRINT),
@@ -479,7 +439,27 @@ class XUIAPI:
                     "flow": reality.get("flow", "xtls-rprx-vision"),
                     "sub_id": sub_id,
                 }
-            return None
+
+            success = await self.add_client(email, config.INBOUND_ID, new_client)
+            if success:
+                logger.info(f"Client created: {email} in inbound {config.INBOUND_ID}")
+                return {
+                    "client_id": client_id,
+                    "email": email,
+                    "port": reality.get("port", inbound.get("port", 443)),
+                    "security": "reality",
+                    "remark": inbound.get("remark", ""),
+                    "sni": reality["sni"],
+                    "pbk": reality["public_key"],
+                    "fp": reality.get("fingerprint", config.REALITY_FINGERPRINT),
+                    "sid": reality["short_id"],
+                    "spx": reality.get("spider_x", config.REALITY_SPIDER_X),
+                    "flow": reality.get("flow", "xtls-rprx-vision"),
+                    "sub_id": sub_id,
+                }
+            else:
+                logger.error(f"Failed to create client {email} via API")
+                return None
         except Exception as e:
             logger.exception(f"Create profile error: {e}")
             return None
@@ -489,66 +469,27 @@ class XUIAPI:
             expiry_time = 0
 
         try:
-            inbound = await self.get_inbound(config.INBOUND_ID)
-            if not inbound:
-                return False
+            final_expiry_time = expiry_time
+            if expiry_time < 1577836800:
+                final_expiry_time = 0
+            elif expiry_time > 2000000000:
+                final_expiry_time = 0
 
-            settings = self._loads_json(inbound.get("settings", "{}"), {})
-            clients = settings.get("clients", [])
-
-            updated = False
-            for client in clients:
-                if client["email"] == email:
-                    final_expiry_time = expiry_time
-                    if expiry_time < 1577836800:
-                        final_expiry_time = 0
-                    elif expiry_time > 2000000000:
-                        final_expiry_time = 0
-                    client["expiryTime"] = final_expiry_time * 1000
-                    updated = True
-                    break
-
-            if not updated:
-                return False
-
-            settings["clients"] = clients
-
-            # Sanity check: verify inbound is valid before overwrite
-            if inbound.get("protocol") != "vless":
-                logger.error(
-                    f"SAFETY ABORT: inbound {config.INBOUND_ID} protocol is "
-                    f"'{inbound.get('protocol')}', expected 'vless'. Skipping update."
-                )
-                return False
-            if not settings.get("clients"):
-                logger.error(
-                    f"SAFETY ABORT: inbound {config.INBOUND_ID} clients list is empty. "
-                    f"Skipping update."
-                )
-                return False
-
-            logger.info(
-                f"Pre-update check: inbound {config.INBOUND_ID}, "
-                f"protocol={inbound.get('protocol')}, "
-                f"clients={len(settings['clients'])}"
-            )
-
-            update_data = {
-                "up": inbound["up"],
-                "down": inbound["down"],
-                "total": inbound["total"],
-                "remark": inbound["remark"],
-                "enable": inbound["enable"],
-                "expiryTime": inbound["expiryTime"],
-                "listen": inbound["listen"],
-                "port": inbound["port"],
-                "protocol": inbound["protocol"],
-                "settings": json.dumps(settings, indent=2),
-                "streamSettings": inbound["streamSettings"],
-                "sniffing": inbound["sniffing"],
+            # Use client-specific API
+            client_data = {
+                "expiryTime": final_expiry_time * 1000,
             }
 
-            return await self.update_inbound(config.INBOUND_ID, update_data)
+            if config.BOT_DRY_RUN:
+                logger.info(f"DRY RUN: Would update expiry for {email} to {final_expiry_time}")
+                return True
+
+            success = await self.update_client(email, client_data)
+            if success:
+                logger.info(f"Client expiry updated: {email}")
+            else:
+                logger.error(f"Failed to update expiry for {email}")
+            return success
         except Exception as e:
             logger.exception(f"Update client expiry error: {e}")
             return False
