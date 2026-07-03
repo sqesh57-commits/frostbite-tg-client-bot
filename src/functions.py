@@ -3,6 +3,7 @@ import uuid
 import json
 import logging
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, quote, urlparse
 from config import config
@@ -15,6 +16,9 @@ class XUIAPI:
         self.session = None
         self.cookie_jar = aiohttp.CookieJar(unsafe=True)
         self._reality_cache = None
+        self._csrf_token = ""
+        self._base_path = ""
+        self._logged_in = False
 
     def _loads_json(self, value, default=None):
         if default is None:
@@ -43,34 +47,67 @@ class XUIAPI:
             )
 
     def _build_url(self, path: str) -> str:
-        base_url = config.XUI_API_URL.rstrip('/')
-        return f"{base_url}{path}"
+        base = config.XUI_API_URL.rstrip('/')
+        bp = self._base_path.rstrip('/') if self._base_path else ''
+        return f"{base}{bp}{path}"
 
     def _auth_headers(self) -> dict:
         headers = {}
         url = config.XUI_API_URL.lower()
         if "localhost" in url or "127.0.0.1" in url:
-            # Localhost — nginx пропускает, шлём Bearer токен панели
             if config.XUI_API_TOKEN:
                 headers["Authorization"] = f"Bearer {config.XUI_API_TOKEN}"
         else:
-            # Внешний доступ — нужен Basic auth для nginx
             if config.NGINX_BASIC_AUTH_USER:
                 import base64
                 creds = base64.b64encode(
                     f"{config.NGINX_BASIC_AUTH_USER}:{config.NGINX_BASIC_AUTH_PASSWORD}".encode()
                 ).decode()
                 headers["Authorization"] = f"Basic {creds}"
+        if self._csrf_token:
+            headers["X-CSRF-Token"] = self._csrf_token
         return headers
 
-    async def login(self):
+    async def _get_csrf(self):
+        """GET / to extract CSRF token and base-path from HTML."""
         try:
             await self._ensure_session()
+            url = self._build_url("/")
+            async with self.session.get(url, headers=self._auth_headers()) as resp:
+                html = await resp.text()
+
+                # Extract CSRF token: <meta name="csrf-token" content="...">
+                m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+                if m:
+                    self._csrf_token = m.group(1)
+                    logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
+
+                # Extract base-path: <meta name="base-path" content="...">
+                m = re.search(r'name="base-path"\s+content="([^"]*)"', html)
+                if m:
+                    self._base_path = m.group(1)
+                    logger.info(f"Base-path detected: {self._base_path or '/'}")
+
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to get CSRF/base-path: {e}")
+            return False
+
+    async def login(self):
+        """Login with CSRF support. Auto-detects 3x-ui version."""
+        try:
+            await self._ensure_session()
+
+            # Step 1: GET / to get cookies + CSRF token (3.4.x)
+            await self._get_csrf()
+
+            # Step 2: POST /login
             login_url = self._build_url("/login")
+            data = {"username": config.XUI_USERNAME, "password": config.XUI_PASSWORD}
 
             async with self.session.post(
                 login_url,
-                data={"username": config.XUI_USERNAME, "password": config.XUI_PASSWORD},
+                data=data,
                 headers=self._auth_headers()
             ) as resp:
                 if resp.status != 200:
@@ -80,6 +117,7 @@ class XUIAPI:
                 try:
                     response = await resp.json()
                     if response.get("success"):
+                        self._logged_in = True
                         logger.info("Login successful")
                         return True
                     else:
@@ -88,38 +126,61 @@ class XUIAPI:
                 except Exception:
                     text = await resp.text()
                     if "success" in text.lower():
+                        self._logged_in = True
                         return True
                     return False
         except Exception as e:
             logger.exception(f"Login error: {e}")
             return False
 
+    async def _request(self, method: str, path: str, **kwargs):
+        """HTTP request with auto-relogin on 401/403."""
+        await self._ensure_session()
+
+        if not self._logged_in:
+            if not await self.login():
+                return None
+
+        url = self._build_url(path)
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+
+        async with self.session.request(method, url, headers=headers, **kwargs) as resp:
+            if resp.status in (401, 403):
+                logger.warning(f"Got {resp.status} on {path}, re-logging in...")
+                self._logged_in = False
+                if not await self.login():
+                    return None
+                # Retry once
+                url = self._build_url(path)
+                headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+                async with self.session.request(method, url, headers=headers, **kwargs) as resp2:
+                    if resp2.status != 200:
+                        logger.error(f"Retry failed with status: {resp2.status}")
+                        return None
+                    return await resp2.json()
+            elif resp.status != 200:
+                logger.error(f"Request {method} {path} failed with status: {resp.status}")
+                return None
+            return await resp.json()
+
     async def get_inbound(self, inbound_id: int):
         try:
-            await self._ensure_session()
-            url = self._build_url(f"/api/inbounds/get/{inbound_id}")
-
-            async with self.session.get(url, headers=self._auth_headers()) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if data.get("success"):
-                    return data.get("obj")
-                return None
+            data = await self._request("GET", f"/api/inbounds/get/{inbound_id}")
+            if data and data.get("success"):
+                return data.get("obj")
+            return None
         except Exception as e:
             logger.exception(f"Get inbound error: {e}")
             return None
 
     async def update_inbound(self, inbound_id: int, data: dict):
         try:
-            await self._ensure_session()
-            url = self._build_url(f"/api/inbounds/update/{inbound_id}")
-
-            async with self.session.post(url, json=data, headers=self._auth_headers()) as resp:
-                if resp.status != 200:
-                    return False
-                response = await resp.json()
-                return response.get("success", False)
+            result = await self._request(
+                "POST",
+                f"/api/inbounds/update/{inbound_id}",
+                json=data
+            )
+            return result.get("success", False) if result else False
         except Exception as e:
             logger.exception(f"Update inbound error: {e}")
             return False
@@ -235,9 +296,6 @@ class XUIAPI:
             return {}
 
     async def create_vless_profile(self, telegram_id: int, expiry_time: int = 0):
-        if not await self.login():
-            return None
-
         if expiry_time < 0:
             expiry_time = 0
 
@@ -336,9 +394,6 @@ class XUIAPI:
             return None
 
     async def update_client_expiry(self, email: str, expiry_time: int):
-        if not await self.login():
-            return False
-
         if expiry_time < 0:
             expiry_time = 0
 
@@ -408,48 +463,30 @@ class XUIAPI:
             return False
 
     async def get_user_stats(self, email: str):
-        if not await self.login():
-            return {"upload": 0, "download": 0}
-
         try:
-            url = self._build_url(f"/api/inbounds/getClientTraffics/{email}")
-
-            async with self.session.get(url, headers=self._auth_headers()) as resp:
-                if resp.status != 200:
-                    return {"upload": 0, "download": 0}
-
-                data = await resp.json()
-                if data.get("success"):
-                    client_data = data.get("obj")
-                    if isinstance(client_data, dict):
-                        return {
-                            "upload": client_data.get("up", 0),
-                            "download": client_data.get("down", 0)
-                        }
+            data = await self._request("GET", f"/api/inbounds/getClientTraffics/{email}")
+            if data and data.get("success"):
+                client_data = data.get("obj")
+                if isinstance(client_data, dict):
+                    return {
+                        "upload": client_data.get("up", 0),
+                        "download": client_data.get("down", 0)
+                    }
         except Exception as e:
             logger.error(f"Stats error: {e}")
         return {"upload": 0, "download": 0}
 
     async def get_online_users(self):
-        if not await self.login():
-            return 0
-
         try:
-            url = self._build_url("/api/inbounds/onlines")
-
-            async with self.session.post(url, headers=self._auth_headers()) as resp:
-                if resp.status != 200:
-                    return 0
-
-                data = await resp.json()
-                online = 0
-                if data.get("success"):
-                    users = data.get("obj")
-                    if isinstance(users, list):
-                        for user in users:
-                            if str(user).startswith("user_"):
-                                online += 1
-                return online
+            data = await self._request("POST", "/api/inbounds/onlines")
+            online = 0
+            if data and data.get("success"):
+                users = data.get("obj")
+                if isinstance(users, list):
+                    for user in users:
+                        if str(user).startswith("user_"):
+                            online += 1
+            return online
         except Exception as e:
             logger.error(f"Online users error: {e}")
         return 0
