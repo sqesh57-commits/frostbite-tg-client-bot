@@ -92,6 +92,11 @@ async def setup_bot_commands(bot: Bot):
 async def main():
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
+
+    logger.info(
+        f"Bot starting. XUI_API_URL={config.XUI_API_URL}, "
+        f"INBOUND_ID={config.INBOUND_ID}, XUI_SUB_PATH={config.XUI_SUB_PATH}"
+    )
     
     try:
         await init_db()
