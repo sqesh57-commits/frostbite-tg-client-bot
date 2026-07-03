@@ -16,12 +16,16 @@ async def main():
     try:
         print("=== 3x-ui API Diagnostic ===\n")
 
-        # Login
+        # Login (auto-detects CSRF and base-path)
         ok = await api.login()
         print(f"login={ok}")
         if not ok:
             print("ERROR: Cannot login. Check XUI_API_URL, XUI_USERNAME, XUI_PASSWORD.")
             return
+
+        # Show detected settings
+        print(f"csrf_token={'present' if api._csrf_token else 'none (old 3x-ui)'}")
+        print(f"base_path={api._base_path or '/'}")
 
         # Get inbound
         inbound = await api.get_inbound(config.INBOUND_ID)
