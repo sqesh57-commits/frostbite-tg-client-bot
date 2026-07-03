@@ -32,6 +32,16 @@ class Config(BaseModel):
     ADMIN_PANEL_PASSWORD: str = os.getenv("ADMIN_PANEL_PASSWORD", "")
     ENABLE_CODE_EDITOR: bool = Field(default=os.getenv("ENABLE_CODE_EDITOR", "false").lower() == "true")
 
+    # Safety flags
+    XUI_ALLOW_FULL_INBOUND_UPDATE: bool = Field(
+        default=os.getenv("XUI_ALLOW_FULL_INBOUND_UPDATE", "false").lower() == "true"
+    )
+    BOT_DRY_RUN: bool = Field(default=os.getenv("BOT_DRY_RUN", "false").lower() == "true")
+    BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE: bool = Field(
+        default=os.getenv("BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE", "false").lower() == "true"
+    )
+    TRIAL_DAYS: int = Field(default=int(os.getenv("TRIAL_DAYS", "3")))
+
     PRICES: Dict[int, Dict[str, int]] = {
         1: {"base_price": 100, "discount_percent": 0},
         3: {"base_price": 300, "discount_percent": 10},

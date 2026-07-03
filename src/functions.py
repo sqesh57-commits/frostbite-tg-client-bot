@@ -46,16 +46,34 @@ class XUIAPI:
                 trust_env=True
             )
 
-    def _build_url(self, path: str) -> str:
+    def _build_url(self, endpoint: str) -> str:
+        """Build full URL from short endpoint.
+
+        Endpoint should NOT include /panel/api/ prefix.
+        Examples: 'inbounds/get/3', 'clients/traffic/user_123'
+        The method auto-prepends /panel/api/.
+        """
         base = config.XUI_API_URL.rstrip('/')
         bp = self._base_path.rstrip('/') if self._base_path else ''
-        # Normalize: strip leading /panel from path if base already has it
-        if path.startswith('/panel/'):
-            return f"{base}{bp}{path}"
-        # 3x-ui 3.4.x: API endpoints under /panel/api/
-        if path.startswith('/api/'):
-            return f"{base}{bp}/panel{path}"
-        return f"{base}{bp}{path}"
+
+        # Strip /panel/api/ or /api/ prefix if accidentally included
+        ep = endpoint.lstrip('/')
+        if ep.startswith('panel/api/'):
+            ep = ep[len('panel/api/'):]
+        elif ep.startswith('api/'):
+            ep = ep[len('api/'):]
+
+        return f"{base}{bp}/panel/api/{ep}"
+
+    def _build_login_url(self) -> str:
+        base = config.XUI_API_URL.rstrip('/')
+        bp = self._base_path.rstrip('/') if self._base_path else ''
+        return f"{base}{bp}/login"
+
+    def _build_root_url(self) -> str:
+        base = config.XUI_API_URL.rstrip('/')
+        bp = self._base_path.rstrip('/') if self._base_path else ''
+        return f"{base}{bp}/"
 
     def _auth_headers(self) -> dict:
         headers = {}
@@ -78,27 +96,22 @@ class XUIAPI:
         """GET / to extract CSRF token from HTML meta tag and detect base-path."""
         try:
             await self._ensure_session()
-
-            # Single request: get cookies + CSRF + base-path
-            url = self._build_url("/")
+            url = self._build_root_url()
             async with self.session.get(url, headers=self._auth_headers()) as resp:
                 html = await resp.text()
 
-                # Extract CSRF token from <meta name="csrf-token" content="...">
                 m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
                 if m:
                     self._csrf_token = m.group(1)
                     logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
 
-                # Extract base-path from <meta name="base-path" content="...">
                 m = re.search(r'name="base-path"\s+content="([^"]*)"', html)
                 if m:
                     self._base_path = m.group(1)
                     logger.info(f"Base-path detected: {self._base_path or '/'}")
 
-                # If no CSRF in HTML, try /csrf-token endpoint
                 if not self._csrf_token:
-                    csrf_url = self._build_url("/csrf-token")
+                    csrf_url = self._build_root_url() + "csrf-token"
                     async with self.session.get(csrf_url, headers=self._auth_headers()) as r2:
                         if r2.status == 200:
                             try:
@@ -119,15 +132,11 @@ class XUIAPI:
         """Login with CSRF support. Auto-detects 3x-ui version."""
         try:
             await self._ensure_session()
-
-            # Step 1: GET / to get cookies + CSRF token (3.4.x)
             await self._get_csrf()
             logger.info(f"Login: csrf={'present' if self._csrf_token else 'none'}, base_path={self._base_path or '/'}")
 
-            # Step 2: POST /login
-            login_url = self._build_url("/login")
+            login_url = self._build_login_url()
             headers = self._auth_headers()
-            logger.info(f"Login: POST {login_url}, headers={list(headers.keys())}")
 
             async with self.session.post(
                 login_url,
@@ -150,8 +159,7 @@ class XUIAPI:
                         logger.error(f"Login failed: {response.get('msg')}")
                         return False
                 except Exception:
-                    text = await resp.text()
-                    if "success" in text.lower():
+                    if "success" in body.lower():
                         self._logged_in = True
                         return True
                     return False
@@ -159,57 +167,114 @@ class XUIAPI:
             logger.exception(f"Login error: {e}")
             return False
 
-    async def _request(self, method: str, path: str, **kwargs):
-        """HTTP request with auto-relogin on 401/403."""
+    async def request_api(self, method: str, endpoint: str, **kwargs) -> dict | None:
+        """Unified API request. Endpoint without /panel/api/ prefix.
+
+        Returns: {"success": bool, "obj": any, "msg": str} or None on error.
+        Auto-logins, retries once on 401/403.
+        """
         await self._ensure_session()
 
         if not self._logged_in:
             if not await self.login():
                 return None
 
-        url = self._build_url(path)
+        url = self._build_url(endpoint)
         headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
 
         async with self.session.request(method, url, headers=headers, **kwargs) as resp:
             if resp.status in (401, 403):
-                logger.warning(f"Got {resp.status} on {path}, re-logging in...")
+                logger.warning(f"Got {resp.status} on {endpoint}, re-logging in...")
                 self._logged_in = False
                 if not await self.login():
                     return None
-                # Retry once
-                url = self._build_url(path)
+                url = self._build_url(endpoint)
                 headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
                 async with self.session.request(method, url, headers=headers, **kwargs) as resp2:
                     if resp2.status != 200:
-                        logger.error(f"Retry failed with status: {resp2.status}")
+                        logger.error(f"Retry failed: {resp2.status} {endpoint}")
                         return None
                     return await resp2.json()
             elif resp.status != 200:
-                logger.error(f"Request {method} {path} failed with status: {resp.status}")
+                logger.error(f"Request {method} {endpoint} failed: {resp.status}")
                 return None
             return await resp.json()
 
+    # ─── Inbound API ──────────────────────────────────────────────────────
+
     async def get_inbound(self, inbound_id: int):
-        try:
-            data = await self._request("GET", f"/api/inbounds/get/{inbound_id}")
-            if data and data.get("success"):
-                return data.get("obj")
-            return None
-        except Exception as e:
-            logger.exception(f"Get inbound error: {e}")
-            return None
+        data = await self.request_api("GET", f"inbounds/get/{inbound_id}")
+        if data and data.get("success"):
+            return data.get("obj")
+        return None
 
     async def update_inbound(self, inbound_id: int, data: dict):
-        try:
-            result = await self._request(
-                "POST",
-                f"/api/inbounds/update/{inbound_id}",
-                json=data
-            )
-            return result.get("success", False) if result else False
-        except Exception as e:
-            logger.exception(f"Update inbound error: {e}")
+        if not config.XUI_ALLOW_FULL_INBOUND_UPDATE:
+            logger.error("SAFETY: Full inbound update disabled. Set XUI_ALLOW_FULL_INBOUND_UPDATE=true to enable.")
             return False
+        result = await self.request_api("POST", f"inbounds/update/{inbound_id}", json=data)
+        return result.get("success", False) if result else False
+
+    # ─── Client API (safe, per-client) ────────────────────────────────────
+
+    async def add_client(self, email: str, inbound_id: int, client_data: dict) -> bool:
+        """Add client to inbound via client-specific API."""
+        payload = {"inboundId": inbound_id, "client": client_data}
+        result = await self.request_api("POST", "clients/add", json=payload)
+        return result.get("success", False) if result else False
+
+    async def update_client(self, email: str, client_data: dict) -> bool:
+        """Update client by email via client-specific API."""
+        result = await self.request_api("POST", f"clients/update/{email}", json=client_data)
+        return result.get("success", False) if result else False
+
+    async def delete_client(self, email: str) -> bool:
+        """Delete client by email via client-specific API."""
+        result = await self.request_api("POST", f"clients/del/{email}")
+        return result.get("success", False) if result else False
+
+    async def get_client(self, email: str) -> dict | None:
+        """Get client by email."""
+        data = await self.request_api("GET", f"clients/get/{email}")
+        if data and data.get("success"):
+            return data.get("obj")
+        return None
+
+    # ─── Stats API ────────────────────────────────────────────────────────
+
+    async def get_user_stats(self, email: str):
+        data = await self.request_api("GET", f"clients/traffic/{email}")
+        if data and data.get("success"):
+            client_data = data.get("obj")
+            if isinstance(client_data, dict):
+                return {
+                    "upload": client_data.get("up", 0),
+                    "download": client_data.get("down", 0),
+                    "total": client_data.get("total", 0),
+                    "enable": client_data.get("enable", True),
+                }
+        return None
+
+    async def get_online_users(self):
+        data = await self.request_api("POST", "clients/onlines")
+        if data and data.get("success"):
+            users = data.get("obj", [])
+            return [u for u in users if isinstance(u, str) and u.startswith("user_")]
+        return []
+
+    # ─── Links API ────────────────────────────────────────────────────────
+
+    async def get_client_links(self, sub_id: str) -> list:
+        data = await self.request_api("GET", f"clients/subLinks/{sub_id}")
+        if data and data.get("success"):
+            return data.get("obj", [])
+        return []
+
+    async def get_client_links_by_email(self, email: str) -> list:
+        data = await self.request_api("GET", f"clients/links/{email}")
+        if data and data.get("success"):
+            return data.get("obj", [])
+        return []
 
     async def get_reality_settings(self) -> dict:
         if self._reality_cache:
@@ -487,55 +552,6 @@ class XUIAPI:
         except Exception as e:
             logger.exception(f"Update client expiry error: {e}")
             return False
-
-    async def get_user_stats(self, email: str):
-        try:
-            data = await self._request("GET", f"/panel/api/clients/traffic/{email}")
-            if data and data.get("success"):
-                client_data = data.get("obj")
-                if isinstance(client_data, dict):
-                    return {
-                        "upload": client_data.get("up", 0),
-                        "download": client_data.get("down", 0)
-                    }
-        except Exception as e:
-            logger.error(f"Stats error: {e}")
-        return {"upload": 0, "download": 0}
-
-    async def get_online_users(self):
-        try:
-            data = await self._request("POST", "/panel/api/clients/onlines")
-            online = 0
-            if data and data.get("success"):
-                users = data.get("obj")
-                if isinstance(users, list):
-                    for user in users:
-                        if str(user).startswith("user_"):
-                            online += 1
-            return online
-        except Exception as e:
-            logger.error(f"Online users error: {e}")
-        return 0
-
-    async def get_client_links(self, sub_id: str) -> list:
-        """Get all protocol URLs for a subscription ID from 3x-ui API."""
-        try:
-            data = await self._request("GET", f"/panel/api/clients/subLinks/{sub_id}")
-            if data and data.get("success"):
-                return data.get("obj", [])
-        except Exception as e:
-            logger.error(f"Get client links error: {e}")
-        return []
-
-    async def get_client_links_by_email(self, email: str) -> list:
-        """Get all protocol URLs for a client by email from 3x-ui API."""
-        try:
-            data = await self._request("GET", f"/panel/api/clients/links/{email}")
-            if data and data.get("success"):
-                return data.get("obj", [])
-        except Exception as e:
-            logger.error(f"Get client links by email error: {e}")
-        return []
 
     async def close(self):
         if self.session:
