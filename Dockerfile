@@ -1,27 +1,24 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y \
-    procps \
-    psmisc \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -s /bin/bash botuser
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip wheel \
+    && pip install --no-cache-dir -r /app/requirements.txt
 
-RUN chown -R botuser:botuser /app
+COPY src /app/src
+COPY templates /app/templates
 
-USER botuser
+WORKDIR /app/src
 
-EXPOSE 8501
+HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
+    CMD python -c "import os,signal; signal.alarm(0)" || exit 1
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501')" || exit 1
-
-CMD ["streamlit", "run", "admin_panel.py", "--server.port", "8501", "--server.headless", "true"]
+CMD ["python", "app.py"]
