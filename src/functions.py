@@ -279,6 +279,27 @@ class XUIAPI:
             clients.append(new_client)
             settings["clients"] = clients
 
+            # Sanity check: verify inbound is valid before overwrite
+            if inbound.get("protocol") != "vless":
+                logger.error(
+                    f"SAFETY ABORT: inbound {config.INBOUND_ID} protocol is "
+                    f"'{inbound.get('protocol')}', expected 'vless'. Skipping update."
+                )
+                return None
+            if not settings.get("clients"):
+                logger.error(
+                    f"SAFETY ABORT: inbound {config.INBOUND_ID} clients list is empty "
+                    f"after modification. Skipping update."
+                )
+                return None
+
+            logger.info(
+                f"Pre-update check: inbound {config.INBOUND_ID}, "
+                f"protocol={inbound.get('protocol')}, "
+                f"clients={len(settings['clients'])} "
+                f"(was {len(clients) - 1})"
+            )
+
             update_data = {
                 "up": inbound["up"],
                 "down": inbound["down"],
@@ -345,6 +366,26 @@ class XUIAPI:
                 return False
 
             settings["clients"] = clients
+
+            # Sanity check: verify inbound is valid before overwrite
+            if inbound.get("protocol") != "vless":
+                logger.error(
+                    f"SAFETY ABORT: inbound {config.INBOUND_ID} protocol is "
+                    f"'{inbound.get('protocol')}', expected 'vless'. Skipping update."
+                )
+                return False
+            if not settings.get("clients"):
+                logger.error(
+                    f"SAFETY ABORT: inbound {config.INBOUND_ID} clients list is empty. "
+                    f"Skipping update."
+                )
+                return False
+
+            logger.info(
+                f"Pre-update check: inbound {config.INBOUND_ID}, "
+                f"protocol={inbound.get('protocol')}, "
+                f"clients={len(settings['clients'])}"
+            )
 
             update_data = {
                 "up": inbound["up"],

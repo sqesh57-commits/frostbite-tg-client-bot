@@ -1,11 +1,23 @@
 services:
   bot:
     build: .
-    container_name: 3xui-tg-client-pay
+    container_name: frostbite-tg-client-bot
     restart: unless-stopped
-    network_mode: host
     env_file:
-      - .env
+      - ./src/.env
     environment:
       - ADMIN_PANEL_PASSWORD=${ADMIN_PANEL_PASSWORD:-}
       - ENABLE_CODE_EDITOR=${ENABLE_CODE_EDITOR:-false}
+    volumes:
+      - ./data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    pids_limit: 128
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

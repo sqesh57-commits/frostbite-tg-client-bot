@@ -229,7 +229,7 @@ async def connect_cmd(message: Message, bot: Bot):
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text='Подключится', url='https://' + sub_url)
+    builder.button(text='Подключится', url=sub_url)
     builder.button(text="⬅️ В меню", callback_data="back_to_menu")
     builder.adjust(1, 1)
 
@@ -493,7 +493,7 @@ async def connect_profile(callback: CallbackQuery):
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text='Подключится', url='https://' + sub_url)
+    builder.button(text='Подключится', url=sub_url)
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1, 1)
 
