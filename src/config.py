@@ -11,7 +11,8 @@ class Config(BaseModel):
     ADMINS: List[int] = Field(default_factory=list)
     XUI_API_URL: str = os.getenv("XUI_API_URL", "http://localhost:54321")
     XUI_BASE_PATH: str = os.getenv("XUI_BASE_PATH", "/panel")
-    XUI_SUB_PORT: str = os.getenv("XUI_SUB_PORT", "54321")
+    XUI_SUB_PATH: str = os.getenv("XUI_SUB_PATH", "/sub/")
+    XUI_SUB_PORT: str = os.getenv("XUI_SUB_PORT", "")
     XUI_API_TOKEN: str = os.getenv("XUI_API_TOKEN", "")
     XUI_USERNAME: str = os.getenv("XUI_USERNAME", "admin")
     XUI_PASSWORD: str = os.getenv("XUI_PASSWORD", "admin")
@@ -21,14 +22,15 @@ class Config(BaseModel):
     PAYMENT_TOKEN: str = os.getenv("PAYMENT_TOKEN", "")
     INBOUND_ID: int = Field(default=os.getenv("INBOUND_ID", 1))
     SUBSCRIPTION_URL_BASE: str = os.getenv("SUBSCRIPTION_URL_BASE", "")
+    REALITY_PUBLIC_KEY: str = os.getenv("REALITY_PUBLIC_KEY", "")
+    REALITY_SNI: str = os.getenv("REALITY_SNI", "")
+    REALITY_SHORT_ID: str = os.getenv("REALITY_SHORT_ID", "")
     REALITY_FINGERPRINT: str = os.getenv("REALITY_FINGERPRINT", "chrome")
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
     NGINX_BASIC_AUTH_USER: str = os.getenv("NGINX_BASIC_AUTH_USER", "")
     NGINX_BASIC_AUTH_PASSWORD: str = os.getenv("NGINX_BASIC_AUTH_PASSWORD", "")
-    # Reality настройки подтягиваются из inbound автоматически
-    REALITY_PUBLIC_KEY: str = ""
-    REALITY_SNI: str = ""
-    REALITY_SHORT_ID: str = ""
+    ADMIN_PANEL_PASSWORD: str = os.getenv("ADMIN_PANEL_PASSWORD", "")
+    ENABLE_CODE_EDITOR: bool = Field(default=os.getenv("ENABLE_CODE_EDITOR", "false").lower() == "true")
 
     PRICES: Dict[int, Dict[str, int]] = {
         1: {"base_price": 100, "discount_percent": 0},
