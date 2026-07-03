@@ -219,7 +219,7 @@ class XUIAPI:
 
     async def add_client(self, email: str, inbound_id: int, client_data: dict) -> bool:
         """Add client to inbound via client-specific API."""
-        payload = {"inboundId": inbound_id, "client": client_data}
+        payload = {"client": client_data, "inboundIds": [inbound_id]}
         result = await self.request_api("POST", "clients/add", json=payload)
         return result.get("success", False) if result else False
 
