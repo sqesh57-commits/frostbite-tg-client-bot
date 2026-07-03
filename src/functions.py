@@ -49,6 +49,10 @@ class XUIAPI:
     def _build_url(self, path: str) -> str:
         base = config.XUI_API_URL.rstrip('/')
         bp = self._base_path.rstrip('/') if self._base_path else ''
+        # 3x-ui 3.4.x: API endpoints moved to /panel/api/
+        # Legacy paths starting with /api/ need /panel prefix
+        if path.startswith('/api/'):
+            return f"{base}{bp}/panel{path}"
         return f"{base}{bp}{path}"
 
     def _auth_headers(self) -> dict:
@@ -69,24 +73,36 @@ class XUIAPI:
         return headers
 
     async def _get_csrf(self):
-        """GET / to extract CSRF token and base-path from HTML."""
+        """GET /csrf-token to get CSRF token, GET / for base-path."""
         try:
             await self._ensure_session()
+
+            # Get base-path from HTML
             url = self._build_url("/")
             async with self.session.get(url, headers=self._auth_headers()) as resp:
                 html = await resp.text()
-
-                # Extract CSRF token: <meta name="csrf-token" content="...">
-                m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
-                if m:
-                    self._csrf_token = m.group(1)
-                    logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
-
-                # Extract base-path: <meta name="base-path" content="...">
                 m = re.search(r'name="base-path"\s+content="([^"]*)"', html)
                 if m:
                     self._base_path = m.group(1)
                     logger.info(f"Base-path detected: {self._base_path or '/'}")
+
+            # Get CSRF token from dedicated endpoint
+            csrf_url = self._build_url("/csrf-token")
+            async with self.session.get(csrf_url, headers=self._auth_headers()) as resp:
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                        token = data.get("csrf_token") or data.get("token") or ""
+                        if token:
+                            self._csrf_token = token
+                            logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
+                    except Exception:
+                        # Try extracting from HTML meta tag as fallback
+                        text = await resp.text()
+                        m = re.search(r'name="csrf-token"\s+content="([^"]+)"', text)
+                        if m:
+                            self._csrf_token = m.group(1)
+                            logger.info(f"CSRF token acquired from HTML: {self._csrf_token[:16]}...")
 
                 return True
         except Exception as e:
@@ -464,7 +480,7 @@ class XUIAPI:
 
     async def get_user_stats(self, email: str):
         try:
-            data = await self._request("GET", f"/api/inbounds/getClientTraffics/{email}")
+            data = await self._request("GET", f"/panel/api/clients/traffic/{email}")
             if data and data.get("success"):
                 client_data = data.get("obj")
                 if isinstance(client_data, dict):
@@ -478,7 +494,7 @@ class XUIAPI:
 
     async def get_online_users(self):
         try:
-            data = await self._request("POST", "/api/inbounds/onlines")
+            data = await self._request("POST", "/panel/api/clients/onlines")
             online = 0
             if data and data.get("success"):
                 users = data.get("obj")
