@@ -16,7 +16,7 @@ from database import (
 from functions import (
     create_vless_profile, generate_vless_url,
     get_user_stats, generate_sub_url, update_client_expiry, get_safe_expiry_timestamp,
-    force_update_profile_expiry
+    force_update_profile_expiry, get_client_links
 )
 
 logger = logging.getLogger(__name__)
@@ -189,9 +189,19 @@ async def connect_cmd(message: Message, bot: Bot):
     except Exception as e:
         logger.error(f"Error auto-updating profile expiry: {e}")
 
-    vless_url = generate_vless_url(profile_data)
     sub_id = profile_data.get("sub_id")
-    sub_url = generate_sub_url(sub_id) if sub_id else vless_url
+    sub_url = generate_sub_url(sub_id) if sub_id else ""
+
+    # Get VLESS link from 3x-ui API
+    vless_url = ""
+    if sub_id:
+        links = await get_client_links(sub_id)
+        for link in links:
+            if isinstance(link, str) and link.startswith("vless://"):
+                vless_url = link
+                break
+    if not vless_url:
+        vless_url = sub_url
 
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
     qr.add_data(sub_url)
@@ -453,9 +463,19 @@ async def connect_profile(callback: CallbackQuery):
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
         return
 
-    vless_url = generate_vless_url(profile_data)
     sub_id = profile_data.get("sub_id")
-    sub_url = generate_sub_url(sub_id) if sub_id else vless_url
+    sub_url = generate_sub_url(sub_id) if sub_id else ""
+
+    # Get VLESS link from 3x-ui API
+    vless_url = ""
+    if sub_id:
+        links = await get_client_links(sub_id)
+        for link in links:
+            if isinstance(link, str) and link.startswith("vless://"):
+                vless_url = link
+                break
+    if not vless_url:
+        vless_url = sub_url
 
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
     qr.add_data(sub_url)

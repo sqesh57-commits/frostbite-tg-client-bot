@@ -49,8 +49,10 @@ class XUIAPI:
     def _build_url(self, path: str) -> str:
         base = config.XUI_API_URL.rstrip('/')
         bp = self._base_path.rstrip('/') if self._base_path else ''
-        # 3x-ui 3.4.x: API endpoints moved to /panel/api/
-        # Legacy paths starting with /api/ need /panel prefix
+        # Normalize: strip leading /panel from path if base already has it
+        if path.startswith('/panel/'):
+            return f"{base}{bp}{path}"
+        # 3x-ui 3.4.x: API endpoints under /panel/api/
         if path.startswith('/api/'):
             return f"{base}{bp}/panel{path}"
         return f"{base}{bp}{path}"
@@ -333,7 +335,7 @@ class XUIAPI:
             return None
 
         try:
-            settings = json.loads(inbound["settings"])
+            settings = self._loads_json(inbound.get("settings", "{}"), {})
             clients = settings.get("clients", [])
 
             client_id = str(uuid.uuid4())
@@ -426,7 +428,7 @@ class XUIAPI:
             if not inbound:
                 return False
 
-            settings = json.loads(inbound["settings"])
+            settings = self._loads_json(inbound.get("settings", "{}"), {})
             clients = settings.get("clients", [])
 
             updated = False
@@ -515,6 +517,26 @@ class XUIAPI:
             logger.error(f"Online users error: {e}")
         return 0
 
+    async def get_client_links(self, sub_id: str) -> list:
+        """Get all protocol URLs for a subscription ID from 3x-ui API."""
+        try:
+            data = await self._request("GET", f"/panel/api/clients/subLinks/{sub_id}")
+            if data and data.get("success"):
+                return data.get("obj", [])
+        except Exception as e:
+            logger.error(f"Get client links error: {e}")
+        return []
+
+    async def get_client_links_by_email(self, email: str) -> list:
+        """Get all protocol URLs for a client by email from 3x-ui API."""
+        try:
+            data = await self._request("GET", f"/panel/api/clients/links/{email}")
+            if data and data.get("success"):
+                return data.get("obj", [])
+        except Exception as e:
+            logger.error(f"Get client links by email error: {e}")
+        return []
+
     async def close(self):
         if self.session:
             await self.session.close()
@@ -550,6 +572,22 @@ async def get_user_stats(email: str):
     api = XUIAPI()
     try:
         return await api.get_user_stats(email)
+    finally:
+        await api.close()
+
+
+async def get_client_links(sub_id: str):
+    api = XUIAPI()
+    try:
+        return await api.get_client_links(sub_id)
+    finally:
+        await api.close()
+
+
+async def get_client_links_by_email(email: str):
+    api = XUIAPI()
+    try:
+        return await api.get_client_links_by_email(email)
     finally:
         await api.close()
 
