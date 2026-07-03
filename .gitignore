@@ -1,0 +1,12 @@
+.env
+.venv
+venv
+__pycache__
+temp
+*.db
+*.json
+.mimocode
+.idea
+.vscode
+*.pyc
+bot_error.log

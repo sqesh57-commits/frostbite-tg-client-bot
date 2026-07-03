@@ -1,0 +1,13 @@
+.git
+.github
+.mimocode
+venv
+.venv
+__pycache__
+*.db
+*.log
+.env
+.idea
+.vscode
+bot_error.log
+bot.pid
