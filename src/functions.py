@@ -73,36 +73,40 @@ class XUIAPI:
         return headers
 
     async def _get_csrf(self):
-        """GET /csrf-token to get CSRF token, GET / for base-path."""
+        """GET / to extract CSRF token from HTML meta tag and detect base-path."""
         try:
             await self._ensure_session()
 
-            # Get base-path from HTML
+            # Single request: get cookies + CSRF + base-path
             url = self._build_url("/")
             async with self.session.get(url, headers=self._auth_headers()) as resp:
                 html = await resp.text()
+
+                # Extract CSRF token from <meta name="csrf-token" content="...">
+                m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+                if m:
+                    self._csrf_token = m.group(1)
+                    logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
+
+                # Extract base-path from <meta name="base-path" content="...">
                 m = re.search(r'name="base-path"\s+content="([^"]*)"', html)
                 if m:
                     self._base_path = m.group(1)
                     logger.info(f"Base-path detected: {self._base_path or '/'}")
 
-            # Get CSRF token from dedicated endpoint
-            csrf_url = self._build_url("/csrf-token")
-            async with self.session.get(csrf_url, headers=self._auth_headers()) as resp:
-                if resp.status == 200:
-                    try:
-                        data = await resp.json()
-                        token = data.get("csrf_token") or data.get("token") or ""
-                        if token:
-                            self._csrf_token = token
-                            logger.info(f"CSRF token acquired: {self._csrf_token[:16]}...")
-                    except Exception:
-                        # Try extracting from HTML meta tag as fallback
-                        text = await resp.text()
-                        m = re.search(r'name="csrf-token"\s+content="([^"]+)"', text)
-                        if m:
-                            self._csrf_token = m.group(1)
-                            logger.info(f"CSRF token acquired from HTML: {self._csrf_token[:16]}...")
+                # If no CSRF in HTML, try /csrf-token endpoint
+                if not self._csrf_token:
+                    csrf_url = self._build_url("/csrf-token")
+                    async with self.session.get(csrf_url, headers=self._auth_headers()) as r2:
+                        if r2.status == 200:
+                            try:
+                                data = await r2.json()
+                                token = data.get("csrf_token") or data.get("token") or ""
+                                if token:
+                                    self._csrf_token = token
+                                    logger.info(f"CSRF token from /csrf-token: {self._csrf_token[:16]}...")
+                            except Exception:
+                                pass
 
                 return True
         except Exception as e:
@@ -116,16 +120,20 @@ class XUIAPI:
 
             # Step 1: GET / to get cookies + CSRF token (3.4.x)
             await self._get_csrf()
+            logger.info(f"Login: csrf={'present' if self._csrf_token else 'none'}, base_path={self._base_path or '/'}")
 
             # Step 2: POST /login
             login_url = self._build_url("/login")
-            data = {"username": config.XUI_USERNAME, "password": config.XUI_PASSWORD}
+            headers = self._auth_headers()
+            logger.info(f"Login: POST {login_url}, headers={list(headers.keys())}")
 
             async with self.session.post(
                 login_url,
-                data=data,
-                headers=self._auth_headers()
+                data={"username": config.XUI_USERNAME, "password": config.XUI_PASSWORD},
+                headers=headers
             ) as resp:
+                body = await resp.text()
+                logger.info(f"Login: status={resp.status}, body={body[:200]}")
                 if resp.status != 200:
                     logger.error(f"Login failed with status: {resp.status}")
                     return False
