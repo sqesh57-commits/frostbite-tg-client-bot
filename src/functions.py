@@ -4,6 +4,7 @@ import json
 import logging
 import random
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode, quote, urlparse
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,23 @@ class XUIAPI:
         self.session = None
         self.cookie_jar = aiohttp.CookieJar(unsafe=True)
         self._reality_cache = None
+
+    def _loads_json(self, value, default=None):
+        if default is None:
+            default = {}
+        if isinstance(value, (dict, list)):
+            return value
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+
+    def _first(self, value, default=""):
+        if isinstance(value, list):
+            return value[0] if value else default
+        return value or default
 
     async def _ensure_session(self):
         if self.session is None:
@@ -116,24 +134,85 @@ class XUIAPI:
             return {}
 
         try:
-            stream_settings = json.loads(inbound.get("streamSettings", "{}"))
+            stream_settings_raw = (
+                inbound.get("streamSettings")
+                or inbound.get("stream_settings")
+                or "{}"
+            )
+            inbound_settings_raw = inbound.get("settings") or "{}"
+
+            stream_settings = self._loads_json(stream_settings_raw, {})
+            inbound_settings = self._loads_json(inbound_settings_raw, {})
+
             reality = stream_settings.get("realitySettings", {})
+            reality_nested = reality.get("settings", {})
 
-            settings = json.loads(inbound.get("settings", "{}"))
-            clients = settings.get("clients", [])
+            clients = inbound_settings.get("clients", [])
+            first_client_flow = ""
+            if clients:
+                first_client_flow = next(
+                    (c.get("flow", "") for c in clients if c.get("flow")),
+                    ""
+                )
 
-            public_key = reality.get("publicKey", "")
-            sni = reality.get("serverNames", [""])[0] if reality.get("serverNames") else ""
-            short_id = reality.get("shortIds", [""])[0] if reality.get("shortIds") else ""
-            spider_x = reality.get("spiderX", "/")
-            fingerprint = reality.get("fingerprint", "chrome")
-            flow = ""
+            public_key = (
+                reality_nested.get("publicKey")
+                or reality.get("publicKey")
+                or config.REALITY_PUBLIC_KEY
+                or ""
+            )
 
-            if clients and len(clients) > 0:
-                flow = clients[0].get("flow", "")
+            sni = (
+                reality_nested.get("serverName")
+                or self._first(reality.get("serverNames"), "")
+                or self._first(reality_nested.get("serverNames"), "")
+                or config.REALITY_SNI
+                or config.XUI_SERVER_NAME
+                or ""
+            )
 
-            if not flow and reality.get("flow"):
-                flow = reality.get("flow", "")
+            short_id = (
+                self._first(reality.get("shortIds"), "")
+                or reality_nested.get("shortId")
+                or self._first(reality_nested.get("shortIds"), "")
+                or config.REALITY_SHORT_ID
+                or ""
+            )
+
+            spider_x = (
+                reality_nested.get("spiderX")
+                or reality.get("spiderX")
+                or config.REALITY_SPIDER_X
+                or "/"
+            )
+
+            fingerprint = (
+                reality_nested.get("fingerprint")
+                or reality.get("fingerprint")
+                or config.REALITY_FINGERPRINT
+                or "chrome"
+            )
+
+            flow = (
+                first_client_flow
+                or reality_nested.get("flow")
+                or reality.get("flow")
+                or "xtls-rprx-vision"
+            )
+
+            port = inbound.get("port", 443)
+
+            missing = []
+            if not public_key:
+                missing.append("public_key")
+            if not sni:
+                missing.append("sni")
+            if not short_id:
+                missing.append("short_id")
+
+            if missing:
+                logger.error(f"Reality settings incomplete. Missing: {', '.join(missing)}")
+                return {}
 
             self._reality_cache = {
                 "public_key": public_key,
@@ -142,13 +221,17 @@ class XUIAPI:
                 "spider_x": spider_x,
                 "fingerprint": fingerprint,
                 "flow": flow,
-                "port": inbound.get("port", 443),
+                "port": port,
             }
 
-            logger.info(f"Reality settings loaded: sni={sni}, port={inbound.get('port')}")
+            logger.info(
+                f"Reality settings loaded: sni={sni}, sid={short_id}, "
+                f"fp={fingerprint}, spx={spider_x}, flow={flow}, port={port}"
+            )
             return self._reality_cache
+
         except Exception as e:
-            logger.error(f"Failed to parse Reality settings: {e}")
+            logger.exception(f"Failed to parse Reality settings: {e}")
             return {}
 
     async def create_vless_profile(self, telegram_id: int, expiry_time: int = 0):
@@ -177,7 +260,7 @@ class XUIAPI:
 
             new_client = {
                 "id": client_id,
-                "flow": reality.get("flow", ""),
+                "flow": reality.get("flow", "xtls-rprx-vision"),
                 "email": email,
                 "limitIp": 0,
                 "totalGB": 0,
@@ -186,10 +269,6 @@ class XUIAPI:
                 "tgId": "",
                 "subId": sub_id,
                 "reset": 0,
-                "fingerprint": reality.get("fingerprint", config.REALITY_FINGERPRINT),
-                "publicKey": reality["public_key"],
-                "shortId": reality["short_id"],
-                "spiderX": reality.get("spider_x", config.REALITY_SPIDER_X)
             }
 
             if expiry_time < 1577836800:
@@ -227,7 +306,8 @@ class XUIAPI:
                     "fp": reality.get("fingerprint", config.REALITY_FINGERPRINT),
                     "sid": reality["short_id"],
                     "spx": reality.get("spider_x", config.REALITY_SPIDER_X),
-                    "sub_id": sub_id
+                    "flow": reality.get("flow", "xtls-rprx-vision"),
+                    "sub_id": sub_id,
                 }
             return None
         except Exception as e:
@@ -373,29 +453,44 @@ async def get_user_stats(email: str):
 
 
 def generate_sub_url(sub_id: str) -> str:
+    sub_path = (config.XUI_SUB_PATH or "/sub/").strip()
+
+    if not sub_path.startswith("/"):
+        sub_path = f"/{sub_path}"
+    if not sub_path.endswith("/"):
+        sub_path = f"{sub_path}/"
+
     if not config.SUBSCRIPTION_URL_BASE:
-        from urllib.parse import urlparse
         parsed = urlparse(config.XUI_API_URL)
         scheme = parsed.scheme or "http"
         host = parsed.hostname or "localhost"
-        return f"{scheme}://{host}:{config.XUI_SUB_PORT}/sub/{sub_id}"
-    return f"{config.SUBSCRIPTION_URL_BASE.rstrip('/')}:{config.XUI_SUB_PORT}/sub/{sub_id}"
+        port = f":{config.XUI_SUB_PORT}" if config.XUI_SUB_PORT else ""
+        return f"{scheme}://{host}{port}{sub_path}{sub_id}"
+
+    return f"{config.SUBSCRIPTION_URL_BASE.rstrip('/')}{sub_path}{sub_id}"
 
 
 def generate_vless_url(profile_data: dict) -> str:
-    remark = profile_data.get('remark', '')
-    email = profile_data['email']
+    remark = profile_data.get("remark", "")
+    email = profile_data["email"]
     fragment = f"{remark}-{email}" if remark else email
+
+    query = {
+        "type": "tcp",
+        "security": "reality",
+        "pbk": profile_data.get("pbk", ""),
+        "fp": profile_data.get("fp", "chrome"),
+        "sni": profile_data.get("sni", ""),
+        "sid": profile_data.get("sid", ""),
+        "spx": profile_data.get("spx", "/"),
+        "flow": profile_data.get("flow", "xtls-rprx-vision"),
+        "encryption": "none",
+    }
 
     return (
         f"vless://{profile_data['client_id']}@{config.XUI_HOST}:{profile_data['port']}"
-        f"?type=tcp&security=reality"
-        f"&pbk={profile_data.get('pbk', '')}"
-        f"&fp={profile_data.get('fp', 'chrome')}"
-        f"&sni={profile_data.get('sni', '')}"
-        f"&sid={profile_data.get('sid', '')}"
-        f"&spx={profile_data.get('spx', '/')}"
-        f"#{fragment}"
+        f"?{urlencode(query)}"
+        f"#{quote(fragment)}"
     )
 
 
