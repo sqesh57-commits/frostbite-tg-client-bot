@@ -412,7 +412,7 @@ class XUIAPI:
                 "totalGB": 0,
                 "expiryTime": expiry_time * 1000,
                 "enable": True,
-                "tgId": "",
+                "tgId": 0,
                 "subId": sub_id,
                 "reset": 0,
             }
