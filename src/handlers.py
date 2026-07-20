@@ -26,6 +26,23 @@ router = Router()
 MAX_MESSAGE_LENGTH = 4096
 
 
+def format_user_stats(stats: dict) -> str:
+    def format_traffic(value: int) -> str:
+        megabytes = value / 1024 / 1024
+        if megabytes < 1024:
+            return f"{megabytes:.2f} MB"
+        return f"{megabytes / 1024:.2f} GB"
+
+    upload = format_traffic(stats.get('upload', 0))
+    download = format_traffic(stats.get('download', 0))
+
+    return (
+        "📊 **Ваша статистика:**\n\n"
+        f"🔼 Загружено: `{upload}`\n"
+        f"🔽 Скачано: `{download}`\n"
+    )
+
+
 async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     user = await get_user(chat_id)
     if not user:
@@ -260,23 +277,17 @@ async def stats_cmd(message: Message, bot: Bot):
 
     await message.answer("⚙️ Загружаем вашу статистику...")
     profile_data = safe_json_loads(user.vless_profile_data, default={})
-    stats = await get_user_stats(profile_data["email"])
+    email = profile_data.get("email")
+    if not email:
+        await message.answer("⚠️ Данные профиля повреждены, пересоздайте подключение")
+        return
 
-    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
-    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
-    if upload_size == "GB":
-        upload = f"{int(float(upload) / 1024):.2f}"
+    stats = await get_user_stats(email)
+    if not stats:
+        await message.answer("⚠️ Не удалось получить статистику. Попробуйте позже")
+        return
 
-    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
-    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
-    if download_size == "GB":
-        download = f"{int(float(download) / 1024):.2f}"
-
-    text = (
-        "📊 **Ваша статистика:**\n\n"
-        f"🔼 Загружено: `{upload} {upload_size}`\n"
-        f"🔽 Скачано: `{download} {download_size}`\n"
-    )
+    text = format_user_stats(stats)
 
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ В меню", callback_data="back_to_menu")
@@ -534,24 +545,18 @@ async def user_stats(callback: CallbackQuery):
         return
     await callback.message.edit_text("⚙️ Загружаем вашу статистику...")
     profile_data = safe_json_loads(user.vless_profile_data, default={})
-    stats = await get_user_stats(profile_data["email"])
+    email = profile_data.get("email")
+    if not email:
+        await callback.message.edit_text("⚠️ Данные профиля повреждены, пересоздайте подключение")
+        return
 
-    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
-    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
-    if upload_size == "GB":
-        upload = f"{int(float(upload) / 1024):.2f}"
-
-    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
-    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
-    if download_size == "GB":
-        download = f"{int(float(download) / 1024):.2f}"
+    stats = await get_user_stats(email)
+    if not stats:
+        await callback.message.edit_text("⚠️ Не удалось получить статистику. Попробуйте позже")
+        return
 
     await callback.message.delete()
-    text = (
-        "📊 **Ваша статистика:**\n\n"
-        f"🔼 Загружено: `{upload} {upload_size}`\n"
-        f"🔽 Скачано: `{download} {download_size}`\n"
-    )
+    text = format_user_stats(stats)
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     await callback.message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
