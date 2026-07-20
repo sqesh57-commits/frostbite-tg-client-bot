@@ -10,7 +10,8 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import config
 from database import (
-    get_user, create_user, update_subscription,
+    get_user, create_user, update_subscription, create_order, mark_order_paid,
+    get_pending_orders, approve_order, get_order,
     User, Session
 )
 from functions import (
@@ -337,26 +338,147 @@ async def process_payment(callback: CallbackQuery, bot: Bot):
             return
 
         final_price = config.calculate_price(months)
-        suffix = "месяц" if months == 1 else "месяца" if months in (2, 3, 4) else "месяцев"
-        prices = [LabeledPrice(label=f"VPN подписка на {months} мес.", amount=final_price * 100)]
-        if config.PAYMENT_TOKEN:
-            await bot.send_invoice(
-                chat_id=callback.from_user.id,
-                title=f"VPN подписка на {months} месяцев",
-                description=f"Доступ к VPN сервису на {months} {suffix}",
-                payload=f"subscription_{months}",
-                provider_token=config.PAYMENT_TOKEN,
-                currency="RUB",
-                prices=prices,
-                start_parameter="create_subscription",
-                need_email=True,
-                need_phone_number=False
-            )
-        else:
-            await callback.message.answer("❌ Оплата временно недоступна")
+        order = await create_order(callback.from_user.id, months, final_price)
+        if not order:
+            await callback.message.answer("❌ Не удалось создать заказ. Нажмите /start и попробуйте снова.")
+            return
+
+        card_number = config.PAYMENT_CARD_NUMBER or "укажите карту в PAYMENT_CARD_NUMBER"
+        card_holder = config.PAYMENT_CARD_HOLDER or "получатель не указан"
+        comment_line = (
+            f"\n💬 Комментарий к переводу: `{order.payment_code}`"
+            if config.PAYMENT_COMMENT_REQUIRED else
+            f"\n🔎 Код платежа для сверки: `{order.payment_code}`"
+        )
+
+        text = (
+            "🧾 **Заказ создан**\n\n"
+            f"ID заказа: `{order.order_uuid}`\n"
+            f"Тариф: `{months}` мес.\n"
+            f"Сумма: `{final_price}` ₽\n\n"
+            "💳 **Реквизиты для перевода**\n"
+            f"Карта: `{card_number}`\n"
+            f"Получатель: `{card_holder}`"
+            f"{comment_line}\n\n"
+            "После перевода нажмите кнопку **Я оплатил**. "
+            "Администратор проверит поступление и продлит VPN вручную."
+        )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✅ Я оплатил", callback_data=f"order_paid:{order.order_uuid}")
+        builder.button(text="⬅️ Назад", callback_data="renew_sub")
+        builder.adjust(1)
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Payment error: {e}")
-        await callback.message.answer("❌ Ошибка при создании счета на оплату")
+        logger.error(f"Payment order error: {e}")
+        await callback.message.answer("❌ Ошибка при создании заказа")
+
+
+@router.callback_query(F.data.startswith("order_paid:"))
+async def user_mark_order_paid(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    order_uuid = callback.data.split(":", 1)[1]
+    order = await mark_order_paid(order_uuid, callback.from_user.id)
+    if not order:
+        await callback.message.answer("❌ Заказ не найден или уже отправлен на проверку")
+        return
+
+    await callback.message.edit_text(
+        "⏳ **Платеж ожидает проверки**\n\n"
+        f"ID заказа: `{order.order_uuid}`\n"
+        f"Код платежа: `{order.payment_code}`\n"
+        f"Сумма: `{order.amount}` ₽\n\n"
+        "Мы сообщим вам, когда администратор подтвердит оплату.",
+        parse_mode='Markdown'
+    )
+
+    for admin_id in config.ADMINS:
+        try:
+            user = await get_user(callback.from_user.id)
+            admin_text = (
+                "🔔 **Новый платеж на проверку**\n\n"
+                f"Пользователь: `{user.full_name}` | `{user.telegram_id}`\n"
+                f"Username: @{user.username or '—'}\n"
+                f"ID заказа: `{order.order_uuid}`\n"
+                f"Код платежа: `{order.payment_code}`\n"
+                f"Тариф: `{order.months}` мес.\n"
+                f"Сумма: `{order.amount}` ₽"
+            )
+            builder = InlineKeyboardBuilder()
+            builder.button(text="✅ Подтвердить", callback_data=f"admin_approve:{order.order_uuid}")
+            await bot.send_message(admin_id, admin_text, parse_mode='Markdown', reply_markup=builder.as_markup())
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+
+@router.message(Command("orders"))
+async def pending_orders_cmd(message: Message):
+    if message.from_user.id not in config.ADMINS:
+        await message.answer("⛔ Команда доступна только администраторам")
+        return
+
+    orders = await get_pending_orders()
+    if not orders:
+        await message.answer("✅ Нет заказов, ожидающих проверки")
+        return
+
+    for order in orders:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✅ Подтвердить", callback_data=f"admin_approve:{order.order_uuid}")
+        await message.answer(
+            "⏳ **Заказ ожидает проверки**\n\n"
+            f"ID: `{order.order_uuid}`\n"
+            f"Код: `{order.payment_code}`\n"
+            f"Тариф: `{order.months}` мес.\n"
+            f"Сумма: `{order.amount}` ₽",
+            parse_mode='Markdown',
+            reply_markup=builder.as_markup()
+        )
+
+
+@router.callback_query(F.data.startswith("admin_approve:"))
+async def admin_approve_order(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    if callback.from_user.id not in config.ADMINS:
+        await callback.message.answer("⛔ Недостаточно прав")
+        return
+
+    order_uuid = callback.data.split(":", 1)[1]
+    order_before = await get_order(order_uuid)
+    order = await approve_order(order_uuid, callback.from_user.id)
+    if not order or not order_before:
+        await callback.message.answer("❌ Заказ не найден или уже обработан")
+        return
+
+    user = None
+    with Session() as session:
+        user = session.query(User).filter_by(id=order.user_id).first()
+
+    if user and user.vless_profile_data:
+        try:
+            profile_data = safe_json_loads(user.vless_profile_data, default={})
+            email = profile_data.get("email")
+            if email:
+                expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+                await update_client_expiry(email, expiry_time)
+        except Exception as e:
+            logger.error(f"Failed to update expiry time in 3x-ui: {e}")
+
+    if user:
+        await bot.send_message(
+            user.telegram_id,
+            f"✅ Оплата подтверждена! Подписка продлена на {order.months} мес.\n"
+            f"Новая дата окончания: `{user.subscription_end.strftime('%d-%m-%Y %H:%M')}`",
+            parse_mode='Markdown'
+        )
+
+    await callback.message.edit_text(
+        "✅ **Заказ подтвержден**\n\n"
+        f"ID: `{order.order_uuid}`\n"
+        f"Код: `{order.payment_code}`\n"
+        f"Сумма: `{order.amount}` ₽",
+        parse_mode='Markdown'
+    )
 
 
 @router.pre_checkout_query()

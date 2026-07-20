@@ -81,6 +81,7 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="connect", description="✅ Подключить VPN"),
         BotCommand(command="stats", description="📊 Статистика"),
         BotCommand(command="help", description="ℹ️ Справка"),
+        BotCommand(command="orders", description="🧾 Заказы на проверку (админ)"),
     ]
     
     try:
