@@ -19,6 +19,6 @@ COPY templates /app/templates
 WORKDIR /app/src
 
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 \
-    CMD python -c "import os,signal; signal.alarm(0)" || exit 1
+    CMD python healthcheck.py
 
 CMD ["python", "app.py"]
