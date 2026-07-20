@@ -40,6 +40,11 @@ class Config(BaseModel):
     BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE: bool = Field(
         default=os.getenv("BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE", "false").lower() == "true"
     )
+    BOT_BLOCKED_PROFILE_CREATE_IDS: List[int] = Field(default_factory=list)
+    BOT_PROFILE_CREATE_RATE_LIMIT_SECONDS: int = Field(
+        default=int(os.getenv("BOT_PROFILE_CREATE_RATE_LIMIT_SECONDS", "60"))
+    )
+    BOT_MAX_PROFILES_PER_USER: int = Field(default=int(os.getenv("BOT_MAX_PROFILES_PER_USER", "1")))
     TRIAL_DAYS: int = Field(default=int(os.getenv("TRIAL_DAYS", "3")))
 
     PRICES: Dict[int, Dict[str, int]] = {
@@ -49,8 +54,8 @@ class Config(BaseModel):
         12: {"base_price": 1200, "discount_percent": 30}
     }
 
-    @field_validator('ADMINS', mode='before')
-    def parse_admins(cls, value):
+    @field_validator('ADMINS', 'BOT_BLOCKED_PROFILE_CREATE_IDS', mode='before')
+    def parse_id_list(cls, value):
         if isinstance(value, str):
             return [int(admin) for admin in value.split(",") if admin.strip()]
         return value or []
@@ -73,5 +78,6 @@ class Config(BaseModel):
 
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),
+    BOT_BLOCKED_PROFILE_CREATE_IDS=os.getenv("BOT_BLOCKED_PROFILE_CREATE_IDS", ""),
     INBOUND_ID=os.getenv("INBOUND_ID", 1)
 )

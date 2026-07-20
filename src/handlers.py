@@ -3,6 +3,7 @@ import logging
 import json
 import io
 import qrcode
+import time
 from datetime import datetime, timedelta, timezone
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, BufferedInputFile
@@ -24,6 +25,62 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 MAX_MESSAGE_LENGTH = 4096
+
+profile_create_attempts: dict[int, float] = {}
+
+
+def is_profile_create_admin(user: User) -> bool:
+    return bool(user.is_admin) or user.telegram_id in config.ADMINS
+
+
+def validate_profile_create(user: User) -> tuple[bool, str | None, str | None]:
+    if not config.BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE:
+        return True, None, None
+
+    if is_profile_create_admin(user):
+        return True, None, None
+
+    if user.telegram_id in config.BOT_BLOCKED_PROFILE_CREATE_IDS:
+        return (
+            False,
+            "⛔ Создание VPN-профиля для вашего аккаунта ограничено. Обратитесь в поддержку.",
+            "blocked",
+        )
+
+    if user.subscription_end.replace(tzinfo=None) < datetime.utcnow():
+        return False, "⚠️ Подписка истекла! Продлите подписку.", "inactive_subscription"
+
+    if user.vless_profile_data:
+        return False, "⚠️ VPN-профиль уже создан для вашего аккаунта.", "profile_exists"
+
+    if config.BOT_MAX_PROFILES_PER_USER <= 0:
+        return (
+            False,
+            "⛔ Создание VPN-профилей временно ограничено. Попробуйте позже.",
+            "profile_limit_disabled",
+        )
+
+    now = time.monotonic()
+    last_attempt = profile_create_attempts.get(user.telegram_id)
+    if (
+        last_attempt is not None
+        and now - last_attempt < config.BOT_PROFILE_CREATE_RATE_LIMIT_SECONDS
+    ):
+        return False, "⏳ Слишком много попыток создать профиль. Попробуйте позже.", "rate_limited"
+
+    profile_create_attempts[user.telegram_id] = now
+    return True, None, None
+
+
+async def deny_profile_create(message_target, user: User, reason: str, message_text: str):
+    await message_target.answer(message_text)
+    logger.warning(
+        "Profile creation denied: user_id=%s reason=%s has_active_subscription=%s has_profile=%s",
+        user.id,
+        reason,
+        user.subscription_end.replace(tzinfo=None) >= datetime.utcnow(),
+        bool(user.vless_profile_data),
+    )
 
 
 async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
@@ -160,6 +217,11 @@ async def connect_cmd(message: Message, bot: Bot):
         return
 
     if not user.vless_profile_data:
+        can_create, deny_message, deny_reason = validate_profile_create(user)
+        if not can_create:
+            await deny_profile_create(message, user, deny_reason, deny_message)
+            return
+
         await message.answer("⚙️ Создаем ваш VPN профиль...")
         expiry_time = get_safe_expiry_timestamp(user.subscription_end)
         profile_data = await create_vless_profile(user.telegram_id, expiry_time)
@@ -443,6 +505,12 @@ async def connect_profile(callback: CallbackQuery):
         return
 
     if not user.vless_profile_data:
+        can_create, deny_message, deny_reason = validate_profile_create(user)
+        if not can_create:
+            await deny_profile_create(callback.message, user, deny_reason, deny_message)
+            await callback.answer()
+            return
+
         await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
         expiry_time = get_safe_expiry_timestamp(user.subscription_end)
         profile_data = await create_vless_profile(user.telegram_id, expiry_time)
