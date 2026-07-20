@@ -234,7 +234,32 @@ async def connect_cmd(message: Message, bot: Bot):
         await message.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
 
-    if not user.vless_profile_data:
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    if not profile_data:
+        await message.answer("⚠️ У вас пока нет созданного профиля.")
+        return
+
+    # Verify client still exists in 3x-ui — clear stale data if deleted
+    email = profile_data.get("email")
+    if email:
+        from functions import XUIAPI
+        api = XUIAPI()
+        try:
+            client = await api.get_client(email)
+            if not client:
+                logger.warning(f"Client {email} not found in 3x-ui — clearing stale profile data")
+                with Session() as session:
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                    if db_user:
+                        db_user.vless_profile_data = None
+                        session.commit()
+                user = await get_user(user.telegram_id)
+                profile_data = {}
+        finally:
+            await api.close()
+
+    if not profile_data:
+        # No profile or was cleared — try to create
         can_create, deny_message, deny_reason = validate_profile_create(user)
         if not can_create:
             await deny_profile_create(message, user, deny_reason, deny_message)
@@ -255,9 +280,8 @@ async def connect_cmd(message: Message, bot: Bot):
             await message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
             return
 
-    profile_data = safe_json_loads(user.vless_profile_data, default={})
     if not profile_data:
-        await message.answer("⚠️ У вас пока нет созданного профиля.")
+        await message.answer("⚠️ Не удалось создать профиль.")
         return
 
     try:
@@ -662,6 +686,51 @@ async def connect_profile(callback: CallbackQuery):
     profile_data = safe_json_loads(user.vless_profile_data, default={})
     if not profile_data:
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
+        return
+
+    # Verify client still exists in 3x-ui — clear stale data if deleted
+    email = profile_data.get("email")
+    if email:
+        from functions import XUIAPI
+        api = XUIAPI()
+        try:
+            client = await api.get_client(email)
+            if not client:
+                logger.warning(f"Client {email} not found in 3x-ui — clearing stale profile data")
+                with Session() as session:
+                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                    if db_user:
+                        db_user.vless_profile_data = None
+                        session.commit()
+                user = await get_user(user.telegram_id)
+                profile_data = {}
+        finally:
+            await api.close()
+
+    if not profile_data:
+        can_create, deny_message, deny_reason = validate_profile_create(user)
+        if not can_create:
+            await deny_profile_create(callback.message, user, deny_reason, deny_message)
+            await callback.answer()
+            return
+
+        await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
+        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
+
+        if profile_data:
+            with Session() as session:
+                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                if db_user:
+                    db_user.vless_profile_data = json.dumps(profile_data)
+                    session.commit()
+            user = await get_user(user.telegram_id)
+        else:
+            await callback.message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
+            return
+
+    if not profile_data:
+        await callback.message.answer("⚠️ Не удалось создать профиль.")
         return
 
     sub_id = profile_data.get("sub_id")
