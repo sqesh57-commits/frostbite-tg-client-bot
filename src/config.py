@@ -24,6 +24,8 @@ class Config(BaseModel):
     PAYMENT_CARD_HOLDER: str = os.getenv("PAYMENT_CARD_HOLDER", "")
     PAYMENT_COMMENT_REQUIRED: bool = Field(default=os.getenv("PAYMENT_COMMENT_REQUIRED", "true").lower() == "true")
     INBOUND_ID: int = Field(default=os.getenv("INBOUND_ID", 1))
+    INBOUND_IDS: List[int] = Field(default_factory=list)
+    BOT_GROUP_NAME: str = os.getenv("BOT_GROUP_NAME", "tg_bot_users")
     SUBSCRIPTION_URL_BASE: str = os.getenv("SUBSCRIPTION_URL_BASE", "")
     REALITY_PUBLIC_KEY: str = os.getenv("REALITY_PUBLIC_KEY", "")
     REALITY_SNI: str = os.getenv("REALITY_SNI", "")
@@ -78,6 +80,14 @@ class Config(BaseModel):
             return int(value)
         return value or 1
 
+    @field_validator('INBOUND_IDS', mode='before')
+    def parse_inbound_ids(cls, value):
+        if isinstance(value, str):
+            return [int(x.strip()) for x in value.split(",") if x.strip()]
+        if isinstance(value, list):
+            return value
+        return []
+
     @field_validator('TEMP_INBOUND_ID', mode='before')
     def parse_temp_inbound_id(cls, value):
         if isinstance(value, str):
@@ -102,8 +112,9 @@ class Config(BaseModel):
 
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),
-BOT_BLOCKED_PROFILE_CREATE_IDS=os.getenv("BOT_BLOCKED_PROFILE_CREATE_IDS", ""),
+    BOT_BLOCKED_PROFILE_CREATE_IDS=os.getenv("BOT_BLOCKED_PROFILE_CREATE_IDS", ""),
     INBOUND_ID=os.getenv("INBOUND_ID", 1),
+    INBOUND_IDS=os.getenv("INBOUND_IDS", ""),
     TEMP_INBOUND_ID=os.getenv("TEMP_INBOUND_ID", 1),
     TEMP_WEB_SERVER_PORT=os.getenv("TEMP_WEB_SERVER_PORT", 8080)
 )

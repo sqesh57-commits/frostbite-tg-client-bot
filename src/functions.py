@@ -224,10 +224,21 @@ class XUIAPI:
 
     # ─── Client API (safe, per-client) ────────────────────────────────────
 
-    async def add_client(self, email: str, inbound_id: int, client_data: dict) -> bool:
-        """Add client to inbound via client-specific API."""
-        payload = {"client": client_data, "inboundIds": [inbound_id]}
+    async def add_client(self, email: str, inbound_ids, client_data: dict) -> bool:
+        """Add client to inbound(s) via client-specific API.
+
+        inbound_ids: int (single) or list of ints (multiple inbounds)
+        """
+        if isinstance(inbound_ids, int):
+            inbound_ids = [inbound_ids]
+        payload = {"client": client_data, "inboundIds": inbound_ids}
         result = await self.request_api("POST", "clients/add", json=payload)
+        return result.get("success", False) if result else False
+
+    async def add_to_group(self, emails: list, group_name: str) -> bool:
+        """Add clients to a group."""
+        payload = {"emails": emails, "group": group_name}
+        result = await self.request_api("POST", "clients/groups/bulkAdd", json=payload)
         return result.get("success", False) if result else False
 
     async def update_client(self, email: str, client_data: dict) -> bool:
@@ -410,18 +421,23 @@ class XUIAPI:
             client_id = str(uuid.uuid4())
             email = build_bot_profile_name(telegram_id, telegram_username)
             sub_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{telegram_id}"))
+            comment = f"FS{telegram_id}"
+
+            # Determine inbound IDs: use INBOUND_IDS if set, else fallback to [INBOUND_ID]
+            inbound_ids = config.INBOUND_IDS if config.INBOUND_IDS else [config.INBOUND_ID]
 
             new_client = {
                 "id": client_id,
                 "flow": reality.get("flow", "xtls-rprx-vision"),
                 "email": email,
-                "limitIp": 0,
+                "limitIp": 3,
                 "totalGB": 0,
                 "expiryTime": expiry_time * 1000,
                 "enable": True,
-                "tgId": 0,
+                "tgId": telegram_id,
                 "subId": sub_id,
                 "reset": 0,
+                "comment": comment,
             }
 
             if expiry_time < 1577836800:
@@ -431,7 +447,7 @@ class XUIAPI:
 
             # Use client-specific API instead of full inbound rewrite
             if config.BOT_DRY_RUN:
-                logger.info(f"DRY RUN: Would create client {email} in inbound {config.INBOUND_ID}")
+                logger.info(f"DRY RUN: Would create client {email} in inbounds {inbound_ids}")
                 return {
                     "client_id": client_id,
                     "email": email,
@@ -447,9 +463,19 @@ class XUIAPI:
                     "sub_id": sub_id,
                 }
 
-            success = await self.add_client(email, config.INBOUND_ID, new_client)
+            # Create client in all inbound IDs at once
+            success = await self.add_client(email, inbound_ids, new_client)
             if success:
-                logger.info(f"Client created: {email} in inbound {config.INBOUND_ID}")
+                logger.info(f"Client created: {email} in inbounds {inbound_ids}")
+
+                # Add to group
+                if config.BOT_GROUP_NAME:
+                    try:
+                        await self.add_to_group([email], config.BOT_GROUP_NAME)
+                        logger.info(f"Client {email} added to group {config.BOT_GROUP_NAME}")
+                    except Exception as e:
+                        logger.warning(f"Failed to add client to group: {e}")
+
                 return {
                     "client_id": client_id,
                     "email": email,
