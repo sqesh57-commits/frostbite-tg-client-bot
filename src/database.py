@@ -8,7 +8,10 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "users.db")
+DB_PATH = os.getenv("DB_PATH", "/app/data/users.db")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
