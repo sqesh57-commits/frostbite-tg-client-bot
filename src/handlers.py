@@ -3,7 +3,7 @@ import logging
 import json
 import io
 import qrcode
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from aiogram import Dispatcher, Router, F, Bot
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, BufferedInputFile
 from aiogram.filters import Command
@@ -31,7 +31,7 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     if not user:
         return
 
-    status = "Активна" if user.subscription_end.replace(tzinfo=None) > datetime.utcnow() else "Истекла"
+    status = "Активна" if user.subscription_end > datetime.utcnow() else "Истекла"
     expire_date = user.subscription_end.strftime("%d-%m-%Y %H:%M") if status == "Активна" else status
 
     text = (
@@ -155,7 +155,7 @@ async def connect_cmd(message: Message, bot: Bot):
         await start_cmd(message, bot)
         return
 
-    if user.subscription_end.replace(tzinfo=None) < datetime.utcnow():
+    if user.subscription_end < datetime.utcnow():
         await message.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
 
@@ -438,7 +438,7 @@ async def connect_profile(callback: CallbackQuery):
         await callback.answer("🛑 Ошибка профиля")
         return
 
-    if user.subscription_end.replace(tzinfo=None) < datetime.utcnow():
+    if user.subscription_end < datetime.utcnow():
         await callback.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
 
