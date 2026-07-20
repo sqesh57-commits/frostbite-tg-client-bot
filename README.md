@@ -118,6 +118,9 @@ reality_loaded=True
 | `XUI_PASSWORD` | Пароль панели | |
 | `INBOUND_ID` | ID inbound с Reality в 3x-ui | `3` |
 | `XUI_HOST` | Публичный адрес для VLESS ссылок | `vless.example.com` |
+| `DB_PATH` | Путь к SQLite базе пользователей внутри контейнера | `/app/data/users.db` |
+
+> `docker-compose.yml` монтирует `./data:/app/data`, поэтому значение `DB_PATH=/app/data/users.db` сохраняет базу на хосте в `./data/users.db`.
 
 ### Параметры подписки
 

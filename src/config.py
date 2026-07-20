@@ -27,6 +27,15 @@ class Config(BaseModel):
     REALITY_SHORT_ID: str = os.getenv("REALITY_SHORT_ID", "")
     REALITY_FINGERPRINT: str = os.getenv("REALITY_FINGERPRINT", "chrome")
     REALITY_SPIDER_X: str = os.getenv("REALITY_SPIDER_X", "/")
+    TEMP_INBOUND_ID: int = Field(default=os.getenv("TEMP_INBOUND_ID", 1))
+    TEMP_REALITY_PUBLIC_KEY: str = os.getenv("TEMP_REALITY_PUBLIC_KEY", "")
+    TEMP_REALITY_SNI: str = os.getenv("TEMP_REALITY_SNI", "")
+    TEMP_REALITY_SHORT_ID: str = os.getenv("TEMP_REALITY_SHORT_ID", "")
+    TEMP_REALITY_FINGERPRINT: str = os.getenv("TEMP_REALITY_FINGERPRINT", "chrome")
+    TEMP_REALITY_SPIDER_X: str = os.getenv("TEMP_REALITY_SPIDER_X", "/")
+    TEMP_WEB_SERVER_PORT: int = Field(default=os.getenv("TEMP_WEB_SERVER_PORT", 8080))
+    TEMP_SSL_CERT_PATH: str = os.getenv("TEMP_SSL_CERT_PATH", "")
+    TEMP_SSL_KEY_PATH: str = os.getenv("TEMP_SSL_KEY_PATH", "")
     NGINX_BASIC_AUTH_USER: str = os.getenv("NGINX_BASIC_AUTH_USER", "")
     NGINX_BASIC_AUTH_PASSWORD: str = os.getenv("NGINX_BASIC_AUTH_PASSWORD", "")
     ADMIN_PANEL_PASSWORD: str = os.getenv("ADMIN_PANEL_PASSWORD", "")
@@ -66,6 +75,18 @@ class Config(BaseModel):
             return int(value)
         return value or 1
 
+    @field_validator('TEMP_INBOUND_ID', mode='before')
+    def parse_temp_inbound_id(cls, value):
+        if isinstance(value, str):
+            return int(value)
+        return value or 1
+
+    @field_validator('TEMP_WEB_SERVER_PORT', mode='before')
+    def parse_temp_web_server_port(cls, value):
+        if isinstance(value, str):
+            return int(value)
+        return value or 8080
+
     def calculate_price(self, months: int) -> int:
         if months not in self.PRICES:
             return 0
@@ -78,6 +99,8 @@ class Config(BaseModel):
 
 config = Config(
     ADMINS=os.getenv("ADMINS", ""),
-    BOT_BLOCKED_PROFILE_CREATE_IDS=os.getenv("BOT_BLOCKED_PROFILE_CREATE_IDS", ""),
-    INBOUND_ID=os.getenv("INBOUND_ID", 1)
+BOT_BLOCKED_PROFILE_CREATE_IDS=os.getenv("BOT_BLOCKED_PROFILE_CREATE_IDS", ""),
+    INBOUND_ID=os.getenv("INBOUND_ID", 1),
+    TEMP_INBOUND_ID=os.getenv("TEMP_INBOUND_ID", 1),
+    TEMP_WEB_SERVER_PORT=os.getenv("TEMP_WEB_SERVER_PORT", 8080)
 )
