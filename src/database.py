@@ -15,7 +15,7 @@ class User(Base):
     telegram_id = Column(Integer, unique=True)
     full_name = Column(String)
     username = Column(String)
-    registration_date = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    registration_date = Column(DateTime, default=datetime.utcnow)
     subscription_end = Column(DateTime)
     vless_profile_id = Column(String)
     vless_profile_data = Column(String)
@@ -25,6 +25,23 @@ class User(Base):
 
 engine = create_engine(f'sqlite:///{DB_PATH}', echo=False)
 Session = sessionmaker(bind=engine)
+
+
+def to_naive_utc(dt) -> datetime | None:
+    """Normalize datetime-like values to naive UTC for SQLite storage/comparison."""
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except Exception:
+            return None
+
+    if not isinstance(dt, datetime):
+        return None
+
+    if dt.tzinfo is None:
+        return dt
+
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 async def init_db():
@@ -45,7 +62,7 @@ async def get_user(telegram_id: int):
 
 async def create_user(telegram_id: int, full_name: str, username: str = None, is_admin: bool = False):
     with Session() as session:
-        subscription_end = validate_and_fix_subscription_date(datetime.now(timezone.utc) + timedelta(days=3))
+        subscription_end = validate_and_fix_subscription_date(datetime.utcnow() + timedelta(days=3))
         user = User(
             telegram_id=telegram_id,
             full_name=full_name,
@@ -72,7 +89,7 @@ async def update_subscription(telegram_id: int, months: int):
     with Session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if user:
-            now = datetime.now(timezone.utc)
+            now = datetime.utcnow()
             user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
 
             if user.subscription_end > now:
@@ -90,42 +107,45 @@ async def update_subscription(telegram_id: int, months: int):
 async def get_all_users(with_subscription: bool = None):
     with Session() as session:
         query = session.query(User)
+        now = datetime.utcnow()
         if with_subscription is not None:
             if with_subscription:
-                query = query.filter(User.subscription_end > datetime.now(timezone.utc))
+                query = query.filter(User.subscription_end > now)
             else:
-                query = query.filter(User.subscription_end <= datetime.now(timezone.utc))
-        return query.all()
+                query = query.filter(User.subscription_end <= now)
+
+        users = query.all()
+        dates_changed = False
+        for user in users:
+            original_end = user.subscription_end
+            user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
+            if user.subscription_end != original_end:
+                dates_changed = True
+
+        if dates_changed:
+            session.commit()
+
+        return users
 
 
 async def get_user_stats():
     with Session() as session:
         total = session.query(func.count(User.id)).scalar()
         with_sub = session.query(func.count(User.id)).filter(
-            User.subscription_end > datetime.now(timezone.utc)
+            User.subscription_end > datetime.utcnow()
         ).scalar()
         without_sub = total - with_sub
         return total, with_sub, without_sub
 
 
 def validate_and_fix_subscription_date(subscription_end) -> datetime:
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     default = now + timedelta(days=3)
-
-    if isinstance(subscription_end, str):
-        try:
-            subscription_end = datetime.fromisoformat(subscription_end)
-        except Exception:
-            return default
-
-    if not isinstance(subscription_end, datetime):
+    subscription_end = to_naive_utc(subscription_end)
+    if subscription_end is None:
         return default
 
-    # Strip timezone for comparison (SQLite stores naive datetimes)
-    sub = subscription_end.replace(tzinfo=None)
-    now_naive = now.replace(tzinfo=None)
-
-    if sub < datetime(2020, 1, 1) or sub > now_naive + timedelta(days=3650):
+    if subscription_end < datetime(2020, 1, 1) or subscription_end > now + timedelta(days=3650):
         return default
 
     return subscription_end

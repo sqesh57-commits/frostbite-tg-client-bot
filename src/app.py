@@ -6,8 +6,8 @@ from config import config
 from aiogram import Bot, Dispatcher
 from aiogram.types import PreCheckoutQuery
 from handlers import setup_handlers
-from datetime import datetime, timedelta, timezone
-from database import Session, User, init_db, get_all_users, delete_user_profile
+from datetime import datetime, timedelta
+from database import Session, User, init_db, get_all_users, delete_user_profile, validate_and_fix_subscription_date
 
 # Настройка логирования
 coloredlogs.install(level='info')
@@ -63,7 +63,7 @@ async def update_admins_status():
                     telegram_id=admin_id,
                     full_name=f"Admin {admin_id}",
                     is_admin=True,
-                    subscription_end=datetime.now(timezone.utc) + timedelta(days=365)
+                    subscription_end=validate_and_fix_subscription_date(datetime.utcnow() + timedelta(days=365))
                 )
                 session.add(new_admin)
 
