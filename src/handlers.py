@@ -242,7 +242,7 @@ async def connect_cmd(message: Message, bot: Bot):
 
         await message.answer("⚙️ Создаем ваш VPN профиль...")
         expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-        profile_data = await create_vless_profile(user.telegram_id, expiry_time)
+        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
 
         if profile_data:
             with Session() as session:
@@ -646,7 +646,7 @@ async def connect_profile(callback: CallbackQuery):
 
         await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
         expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-        profile_data = await create_vless_profile(user.telegram_id, expiry_time)
+        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
 
         if profile_data:
             with Session() as session:

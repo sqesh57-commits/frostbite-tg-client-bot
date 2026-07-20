@@ -2,13 +2,20 @@ import aiohttp
 import uuid
 import json
 import logging
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, quote, urlparse
 from config import config
 
 logger = logging.getLogger(__name__)
+
+
+def build_bot_profile_name(telegram_id: int, telegram_username: str | None = None) -> str:
+    """Build the 3x-ui client name for profiles created via Telegram bot."""
+    username = (telegram_username or "").strip().lstrip("@")
+    if username:
+        return f"FS_Bot_@{username}"
+    return f"FS_Bot_{telegram_id}"
 
 
 class XUIAPI:
@@ -225,17 +232,17 @@ class XUIAPI:
 
     async def update_client(self, email: str, client_data: dict) -> bool:
         """Update client by email via client-specific API."""
-        result = await self.request_api("POST", f"clients/update/{email}", json=client_data)
+        result = await self.request_api("POST", f"clients/update/{quote(email, safe='')}", json=client_data)
         return result.get("success", False) if result else False
 
     async def delete_client(self, email: str) -> bool:
         """Delete client by email via client-specific API."""
-        result = await self.request_api("POST", f"clients/del/{email}")
+        result = await self.request_api("POST", f"clients/del/{quote(email, safe='')}")
         return result.get("success", False) if result else False
 
     async def get_client(self, email: str) -> dict | None:
         """Get client by email."""
-        data = await self.request_api("GET", f"clients/get/{email}")
+        data = await self.request_api("GET", f"clients/get/{quote(email, safe='')}")
         if data and data.get("success"):
             return data.get("obj")
         return None
@@ -243,7 +250,7 @@ class XUIAPI:
     # ─── Stats API ────────────────────────────────────────────────────────
 
     async def get_user_stats(self, email: str):
-        data = await self.request_api("GET", f"clients/traffic/{email}")
+        data = await self.request_api("GET", f"clients/traffic/{quote(email, safe='')}")
         if data and data.get("success"):
             client_data = data.get("obj")
             if isinstance(client_data, dict):
@@ -271,7 +278,7 @@ class XUIAPI:
         return []
 
     async def get_client_links_by_email(self, email: str) -> list:
-        data = await self.request_api("GET", f"clients/links/{email}")
+        data = await self.request_api("GET", f"clients/links/{quote(email, safe='')}")
         if data and data.get("success"):
             return data.get("obj", [])
         return []
@@ -386,7 +393,7 @@ class XUIAPI:
             logger.exception(f"Failed to parse Reality settings: {e}")
             return {}
 
-    async def create_vless_profile(self, telegram_id: int, expiry_time: int = 0):
+    async def create_vless_profile(self, telegram_id: int, expiry_time: int = 0, telegram_username: str | None = None):
         if expiry_time < 0:
             expiry_time = 0
 
@@ -401,7 +408,7 @@ class XUIAPI:
 
         try:
             client_id = str(uuid.uuid4())
-            email = f"user_{telegram_id}_{random.randint(1000, 9999)}"
+            email = build_bot_profile_name(telegram_id, telegram_username)
             sub_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{telegram_id}"))
 
             new_client = {
@@ -501,10 +508,10 @@ class XUIAPI:
 
 # === Wrapper functions ===
 
-async def create_vless_profile(telegram_id: int, expiry_time: int = 0):
+async def create_vless_profile(telegram_id: int, expiry_time: int = 0, telegram_username: str | None = None):
     api = XUIAPI()
     try:
-        return await api.create_vless_profile(telegram_id, expiry_time)
+        return await api.create_vless_profile(telegram_id, expiry_time, telegram_username)
     finally:
         await api.close()
 
