@@ -127,6 +127,15 @@ File: `src/.env`
 | `XUI_SUB_PATH` | Subscription path | `/sub/` |
 | `XUI_SUB_PORT` | Subscription port | |
 
+### Profile Creation Protection
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BOT_REQUIRE_ADMIN_FOR_PROFILE_CREATE` | Enables additional business checks before self-service profile creation: active subscription/trial, no existing profile, blacklist, and rate limit. Regular users with active access are not blocked. | `false` |
+| `BOT_BLOCKED_PROFILE_CREATE_IDS` | Comma-separated Telegram IDs that cannot create a new profile. | |
+| `BOT_PROFILE_CREATE_RATE_LIMIT_SECONDS` | Minimum interval between profile creation attempts for one Telegram ID. | `60` |
+| `BOT_MAX_PROFILES_PER_USER` | Maximum profiles per user; the current storage supports one profile, and `0` temporarily disables creation. | `1` |
+
 Example for FrostbiteVPN:
 ```
 SUBSCRIPTION_URL_BASE=https://panel.frostbite-rogueite22768.my-vm.work:20576
