@@ -1,7 +1,9 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta, timezone
 import logging
+import uuid
+import random
 import os
 
 logger = logging.getLogger(__name__)
@@ -26,8 +28,37 @@ class User(Base):
     notified = Column(Boolean, default=False)
 
 
+class VPNProfile(Base):
+    __tablename__ = 'vpn_profiles'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    profile_uuid = Column(String, unique=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String)
+    vless_profile_id = Column(String)
+    vless_profile_data = Column(String)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    subscription_end = Column(DateTime)
+
+
+class Order(Base):
+    __tablename__ = 'orders'
+    id = Column(Integer, primary_key=True)
+    order_uuid = Column(String, unique=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    vpn_profile_id = Column(Integer, ForeignKey('vpn_profiles.id'), nullable=True, index=True)
+    months = Column(Integer, nullable=False)
+    amount = Column(Integer, nullable=False)
+    payment_code = Column(String, unique=True, nullable=False, index=True)
+    status = Column(String, default='created', index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    paid_at = Column(DateTime)
+    verified_at = Column(DateTime)
+    verified_by = Column(Integer)
+
+
 engine = create_engine(f'sqlite:///{DB_PATH}', echo=False)
-Session = sessionmaker(bind=engine)
+Session = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def to_naive_utc(dt) -> datetime | None:
@@ -152,3 +183,117 @@ def validate_and_fix_subscription_date(subscription_end) -> datetime:
         return default
 
     return subscription_end
+
+
+def _generate_payment_code() -> str:
+    return f"VPN-{random.randint(100000, 999999)}"
+
+
+async def get_or_create_default_vpn_profile(user: User):
+    with Session() as session:
+        profile = session.query(VPNProfile).filter_by(user_id=user.id, is_active=True).order_by(VPNProfile.id.asc()).first()
+        if profile:
+            return profile
+
+        profile = VPNProfile(
+            user_id=user.id,
+            name=user.full_name or f"Profile {user.telegram_id}",
+            vless_profile_id=user.vless_profile_id,
+            vless_profile_data=user.vless_profile_data,
+            subscription_end=validate_and_fix_subscription_date(user.subscription_end),
+        )
+        session.add(profile)
+        session.commit()
+        return profile
+
+
+async def create_order(telegram_id: int, months: int, amount: int):
+    with Session() as session:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if not user:
+            return None
+
+        profile = session.query(VPNProfile).filter_by(user_id=user.id, is_active=True).order_by(VPNProfile.id.asc()).first()
+        if not profile:
+            profile = VPNProfile(
+                user_id=user.id,
+                name=user.full_name or f"Profile {user.telegram_id}",
+                vless_profile_id=user.vless_profile_id,
+                vless_profile_data=user.vless_profile_data,
+                subscription_end=validate_and_fix_subscription_date(user.subscription_end),
+            )
+            session.add(profile)
+            session.flush()
+
+        for _ in range(10):
+            payment_code = _generate_payment_code()
+            exists = session.query(Order).filter_by(payment_code=payment_code).first()
+            if not exists:
+                break
+        else:
+            payment_code = f"VPN-{uuid.uuid4().hex[:8].upper()}"
+
+        order = Order(
+            user_id=user.id,
+            vpn_profile_id=profile.id,
+            months=months,
+            amount=amount,
+            payment_code=payment_code,
+            status='created',
+        )
+        session.add(order)
+        session.commit()
+        return order
+
+
+async def get_order(order_uuid: str):
+    with Session() as session:
+        return session.query(Order).filter_by(order_uuid=order_uuid).first()
+
+
+async def mark_order_paid(order_uuid: str, telegram_id: int):
+    with Session() as session:
+        order = session.query(Order).filter_by(order_uuid=order_uuid).first()
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if not order or not user or order.user_id != user.id or order.status != 'created':
+            return None
+        order.status = 'pending_review'
+        order.paid_at = datetime.now(timezone.utc)
+        session.commit()
+        return order
+
+
+async def get_pending_orders():
+    with Session() as session:
+        return session.query(Order).filter_by(status='pending_review').order_by(Order.paid_at.asc()).all()
+
+
+async def approve_order(order_uuid: str, admin_telegram_id: int):
+    with Session() as session:
+        order = session.query(Order).filter_by(order_uuid=order_uuid).first()
+        if not order or order.status != 'pending_review':
+            return None
+        user = session.query(User).filter_by(id=order.user_id).first()
+        profile = session.query(VPNProfile).filter_by(id=order.vpn_profile_id).first() if order.vpn_profile_id else None
+        if not user:
+            return None
+
+        now = datetime.utcnow()
+        user.subscription_end = validate_and_fix_subscription_date(user.subscription_end).replace(tzinfo=None)
+        if user.subscription_end > now:
+            user.subscription_end += timedelta(days=order.months * 30)
+        else:
+            user.subscription_end = now + timedelta(days=order.months * 30)
+        user.subscription_end = validate_and_fix_subscription_date(user.subscription_end).replace(tzinfo=None)
+        user.notified = False
+
+        if profile:
+            profile.subscription_end = user.subscription_end
+            profile.vless_profile_id = user.vless_profile_id
+            profile.vless_profile_data = user.vless_profile_data
+
+        order.status = 'approved'
+        order.verified_at = now
+        order.verified_by = admin_telegram_id
+        session.commit()
+        return order
