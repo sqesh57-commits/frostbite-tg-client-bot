@@ -11,9 +11,10 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import config
 from database import (
-    get_user, create_user, update_subscription, create_order, mark_order_paid,
+    get_user, create_user, create_order, mark_order_paid,
     get_pending_orders, approve_order, cancel_order, get_order,
-    User, Session
+    get_profile_by_user, save_profile, save_user,
+    User, Session, VPNProfile
 )
 from functions import (
     build_bot_profile_name, create_vless_profile, generate_vless_url,
@@ -333,6 +334,8 @@ async def renew_cmd(message: Message, bot: Bot):
 
 @router.message(Command("connect"))
 async def connect_cmd(message: Message, bot: Bot):
+    from vpn_service import VPNService
+
     user = await get_user(message.from_user.id)
     if not user:
         await start_cmd(message, bot)
@@ -342,110 +345,94 @@ async def connect_cmd(message: Message, bot: Bot):
         await message.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
 
-    profile_data = safe_json_loads(user.vless_profile_data, default={})
-    if not profile_data:
-        await message.answer("⚠️ У вас пока нет созданного профиля.")
-        return
-
-    profile_data, _email = await sync_profile_state_with_xui(user, profile_data)
-    if not profile_data:
-        user = await get_user(user.telegram_id)
-
-    if not profile_data:
-        # No profile or was cleared — try to create
-        can_create, deny_message, deny_reason = validate_profile_create(user)
-        if not can_create:
-            await deny_profile_create(message, user, deny_reason, deny_message)
-            return
-
-        await message.answer("⚙️ Создаем ваш VPN профиль...")
-        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
-
-        if profile_data:
-            with Session() as session:
-                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                if db_user:
-                    db_user.vless_profile_data = json.dumps(profile_data)
-                    session.commit()
-            user = await get_user(user.telegram_id)
-        else:
-            await message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
-            return
-
-    if not profile_data:
-        await message.answer("⚠️ Не удалось создать профиль.")
-        return
-
+    vpn = VPNService()
     try:
-        email = profile_data.get("email")
-        if email:
-            current_expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-            if current_expiry_time > 0:
-                await force_update_profile_expiry(email, user.subscription_end)
-    except Exception as e:
-        logger.error(f"Error auto-updating profile expiry: {e}")
+        # Get active profile from DB
+        _, profile = await get_profile_by_user(user.telegram_id)
 
-    sub_id = profile_data.get("sub_id")
-    sub_url = generate_sub_url(sub_id) if sub_id else ""
+        if profile and profile.xui_email:
+            # Verify client still exists in 3x-ui
+            if not await vpn.verify_vpn_profile(profile):
+                logger.warning(f"Client {profile.xui_email} missing from 3x-ui, syncing...")
+                profile = await vpn.sync_vpn_profile(profile, user)
 
-    # Get VLESS link from 3x-ui API
-    vless_url = ""
-    if sub_id:
-        links = await get_client_links(sub_id)
-        for link in links:
-            if isinstance(link, str) and link.startswith("vless://"):
-                vless_url = link
-                break
-    if not vless_url:
-        vless_url = sub_url
+        if not profile or profile.status != 'active':
+            # No profile or failed — try to create
+            can_create, deny_message, deny_reason = validate_profile_create(user)
+            if not can_create:
+                await deny_profile_create(message, user, deny_reason, deny_message)
+                return
 
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(sub_url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+            await message.answer("⚙️ Создаем ваш VPN профиль...")
+            profile = await vpn.register_vpn_profile(user)
 
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
-    photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+            if not profile:
+                await message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
+                return
 
-    text = (
-        "📲 Как подключить VPN\n"
-        "1. Нажмите кнопку «Подключиться»\n"
-        "Откроется страница с вашим VPN-профилем.\n\n"
-        "2. Пролистайте страницу вниз\n"
-        "Найдите кнопки с вашей операционной системой:\n"
-        "📱 Android\n"
-        "🍏 iPhone (iOS)\n\n"
-        "3. Выберите свою систему\n"
-        "Откроется список приложений.\n"
-        "👉 Выберите любое приложение из списка.\n\n"
-        "4. Установите приложение\n"
-        "Если оно не установлено — скачайте его.\n\n"
-        "5. Нажмите на выбранное приложение ещё раз\n\n"
-        "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
-        "6. Подключитесь к VPN\n"
-        "Откроется приложение — нажмите:\n"
-        "👉 Подключиться / Connect\n\n"
-        "✅ Готово\n"
-        "VPN включён — интернет работает без ограничений 🚀\n\n"
-        "💡 Если не получилось\n"
-        "попробуйте другое приложение из списка\n"
-        "или заново нажмите «Подключиться» в боте"
-    )
+        # Generate subscription URL
+        sub_url = generate_sub_url(profile.xui_sub_id) if profile.xui_sub_id else ""
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text='Подключится', url=sub_url)
-    builder.button(text="⬅️ В меню", callback_data="back_to_menu")
-    builder.adjust(1, 1)
+        # Get VLESS link from 3x-ui API
+        vless_url = ""
+        if profile.xui_sub_id:
+            links = await get_client_links(profile.xui_sub_id)
+            for link in links:
+                if isinstance(link, str) and link.startswith("vless://"):
+                    vless_url = link
+                    break
+        if not vless_url:
+            vless_url = sub_url
 
-    await message.answer_photo(
-        photo=photo,
-        caption=text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
-    )
+        # Generate QR code
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(sub_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+
+        text = (
+            "📲 Как подключить VPN\n"
+            "1. Нажмите кнопку «Подключиться»\n"
+            "Откроется страница с вашим VPN-профилем.\n\n"
+            "2. Пролистайте страницу вниз\n"
+            "Найдите кнопки с вашей операционной системой:\n"
+            "📱 Android\n"
+            "🍏 iPhone (iOS)\n\n"
+            "3. Выберите свою систему\n"
+            "Откроется список приложений.\n"
+            "👉 Выберите любое приложение из списка.\n\n"
+            "4. Установите приложение\n"
+            "Если оно не установлено — скачайте его.\n\n"
+            "5. Нажмите на выбранное приложение ещё раз\n\n"
+            "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
+            "6. Подключитесь к VPN\n"
+            "Откроется приложение — нажмите:\n"
+            "👉 Подключиться / Connect\n\n"
+            "✅ Готово\n"
+            "VPN включён — интернет работает без ограничений 🚀\n\n"
+            "💡 Если не получилось\n"
+            "попробуйте другое приложение из списка\n"
+            "или заново нажмите «Подключиться» в боте"
+        )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text='Подключится', url=sub_url)
+        builder.button(text="⬅️ В меню", callback_data="back_to_menu")
+        builder.adjust(1, 1)
+
+        await message.answer_photo(
+            photo=photo,
+            caption=text,
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
+        )
+    finally:
+        await vpn.close()
 
 
 @router.message(Command("stats"))
