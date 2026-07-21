@@ -18,7 +18,7 @@ from database import (
 from functions import (
     build_bot_profile_name, create_vless_profile, generate_vless_url,
     get_user_stats, generate_sub_url, update_client_expiry, get_safe_expiry_timestamp,
-    force_update_profile_expiry, get_client_links
+    force_update_profile_expiry, get_client_links, XUIAPI
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,71 @@ async def deny_profile_create(message_target, user: User, reason: str, message_t
         bool(user.vless_profile_data),
     )
 
+
+
+def build_client_name_candidates(user: User, profile_data: dict | None = None) -> list[str]:
+    """Return likely 3x-ui client emails for existing and legacy bot profiles."""
+    candidates = []
+    if isinstance(profile_data, dict) and profile_data.get("email"):
+        candidates.append(str(profile_data["email"]))
+
+    candidates.append(build_bot_profile_name(user.telegram_id, user.username))
+    candidates.append(build_bot_profile_name(user.telegram_id, None))
+
+    if user.full_name:
+        candidates.append(user.full_name)
+        candidates.append(user.full_name.replace(" ", "_"))
+
+    seen = set()
+    return [candidate for candidate in candidates if candidate and not (candidate in seen or seen.add(candidate))]
+
+
+def save_user_profile_data(telegram_id: int, profile_data: dict | None):
+    serialized = json.dumps(profile_data) if profile_data else None
+    with Session() as session:
+        db_user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if db_user:
+            db_user.vless_profile_data = serialized
+            db_user.vless_profile_id = profile_data.get("client_id") if profile_data else None
+        # Keep the active VPNProfile mirror in sync too; otherwise order approval can
+        # resurrect stale profile data after a manual deletion in 3x-ui.
+        from database import VPNProfile
+        profiles = session.query(VPNProfile).filter_by(user_id=db_user.id, is_active=True).all() if db_user else []
+        for profile in profiles:
+            profile.vless_profile_data = serialized
+            profile.vless_profile_id = db_user.vless_profile_id if db_user else None
+        session.commit()
+
+
+async def resolve_existing_xui_client(user: User, profile_data: dict | None = None) -> tuple[str | None, dict | None]:
+    """Find the user's current 3x-ui client, trying stored and legacy names."""
+    api = XUIAPI()
+    try:
+        for email in build_client_name_candidates(user, profile_data):
+            client = await api.get_client(email)
+            if client:
+                return email, client
+            logger.warning("3x-ui client candidate not found for user %s: %s", user.telegram_id, email)
+        return None, None
+    finally:
+        await api.close()
+
+
+async def sync_profile_state_with_xui(user: User, profile_data: dict | None) -> tuple[dict, str | None]:
+    """Clear stale bot profile data when the matching 3x-ui client was deleted."""
+    if not profile_data:
+        return {}, None
+
+    email, _client = await resolve_existing_xui_client(user, profile_data)
+    if email:
+        if profile_data.get("email") != email:
+            profile_data["email"] = email
+            save_user_profile_data(user.telegram_id, profile_data)
+        return profile_data, email
+
+    logger.warning("No matching 3x-ui client found for user %s; clearing stale bot profile", user.telegram_id)
+    save_user_profile_data(user.telegram_id, None)
+    return {}, None
 
 def format_user_stats(stats: dict) -> str:
     def format_traffic(value: int) -> str:
@@ -282,24 +347,9 @@ async def connect_cmd(message: Message, bot: Bot):
         await message.answer("⚠️ У вас пока нет созданного профиля.")
         return
 
-    # Verify client still exists in 3x-ui — clear stale data if deleted
-    email = profile_data.get("email")
-    if email:
-        from functions import XUIAPI
-        api = XUIAPI()
-        try:
-            client = await api.get_client(email)
-            if not client:
-                logger.warning(f"Client {email} not found in 3x-ui — clearing stale profile data")
-                with Session() as session:
-                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                    if db_user:
-                        db_user.vless_profile_data = None
-                        session.commit()
-                user = await get_user(user.telegram_id)
-                profile_data = {}
-        finally:
-            await api.close()
+    profile_data, _email = await sync_profile_state_with_xui(user, profile_data)
+    if not profile_data:
+        user = await get_user(user.telegram_id)
 
     if not profile_data:
         # No profile or was cleared — try to create
@@ -407,9 +457,9 @@ async def stats_cmd(message: Message, bot: Bot):
 
     await message.answer("⚙️ Загружаем вашу статистику...")
     profile_data = safe_json_loads(user.vless_profile_data, default={})
-    email = profile_data.get("email")
+    profile_data, email = await sync_profile_state_with_xui(user, profile_data)
     if not email:
-        await message.answer("⚠️ Данные профиля повреждены, пересоздайте подключение")
+        await message.answer("⚠️ Профиль не найден в 3x-ui. Нажмите «Подключить», чтобы создать его заново.")
         return
 
     stats = await get_user_stats(email)
@@ -613,14 +663,32 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     xui_update_error = None
     if user:
         try:
-            email = get_order_client_name(user)
-            if email and email != "—":
-                expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+            profile_data = safe_json_loads(user.vless_profile_data, default={})
+            email, _client = await resolve_existing_xui_client(user, profile_data)
+            expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+
+            if email:
                 xui_updated = await update_client_expiry(email, expiry_time)
+                if xui_updated and isinstance(profile_data, dict):
+                    profile_data["email"] = email
+                    save_user_profile_data(user.telegram_id, profile_data)
                 if not xui_updated:
                     xui_update_error = f"3x-ui не подтвердил обновление клиента {email}"
+            elif profile_data:
+                logger.warning(
+                    "Stored profile for user %s is missing in 3x-ui during approval; recreating",
+                    user.telegram_id,
+                )
+                new_profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
+                if new_profile_data:
+                    save_user_profile_data(user.telegram_id, new_profile_data)
+                    xui_updated = True
+                    xui_update_error = None
+                else:
+                    save_user_profile_data(user.telegram_id, None)
+                    xui_update_error = "клиент удален из 3x-ui, пересоздать профиль не удалось"
             else:
-                xui_update_error = "не удалось определить имя клиента 3x-ui"
+                xui_update_error = "у пользователя еще нет созданного клиента 3x-ui"
         except Exception as e:
             xui_update_error = str(e)
             logger.error(f"Failed to update expiry time in 3x-ui: {e}")
@@ -793,24 +861,9 @@ async def connect_profile(callback: CallbackQuery):
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
         return
 
-    # Verify client still exists in 3x-ui — clear stale data if deleted
-    email = profile_data.get("email")
-    if email:
-        from functions import XUIAPI
-        api = XUIAPI()
-        try:
-            client = await api.get_client(email)
-            if not client:
-                logger.warning(f"Client {email} not found in 3x-ui — clearing stale profile data")
-                with Session() as session:
-                    db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                    if db_user:
-                        db_user.vless_profile_data = None
-                        session.commit()
-                user = await get_user(user.telegram_id)
-                profile_data = {}
-        finally:
-            await api.close()
+    profile_data, _email = await sync_profile_state_with_xui(user, profile_data)
+    if not profile_data:
+        user = await get_user(user.telegram_id)
 
     if not profile_data:
         can_create, deny_message, deny_reason = validate_profile_create(user)
@@ -909,9 +962,9 @@ async def user_stats(callback: CallbackQuery):
         return
     await callback.message.edit_text("⚙️ Загружаем вашу статистику...")
     profile_data = safe_json_loads(user.vless_profile_data, default={})
-    email = profile_data.get("email")
+    profile_data, email = await sync_profile_state_with_xui(user, profile_data)
     if not email:
-        await callback.message.edit_text("⚠️ Данные профиля повреждены, пересоздайте подключение")
+        await callback.message.edit_text("⚠️ Профиль не найден в 3x-ui. Нажмите «Подключить», чтобы создать его заново.")
         return
 
     stats = await get_user_stats(email)

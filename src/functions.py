@@ -244,7 +244,13 @@ class XUIAPI:
     async def update_client(self, email: str, client_data: dict) -> bool:
         """Update client by email via client-specific API."""
         result = await self.request_api("POST", f"clients/update/{quote(email, safe='')}", json=client_data)
-        return result.get("success", False) if result else False
+        if not result:
+            logger.error("3x-ui client update returned no response for %s", email)
+            return False
+        if not result.get("success", False):
+            logger.error("3x-ui client update rejected %s: %s", email, result.get("msg") or result)
+            return False
+        return True
 
     async def delete_client(self, email: str) -> bool:
         """Delete client by email via client-specific API."""
@@ -554,7 +560,11 @@ class XUIAPI:
 
             updated_client = self._extract_client_payload(await self.get_client(email))
             updated_expiry = updated_client.get("expiryTime") if updated_client else None
-            if updated_expiry != expiry_time_ms:
+            try:
+                updated_expiry_int = int(updated_expiry)
+            except (TypeError, ValueError):
+                updated_expiry_int = None
+            if updated_expiry_int != expiry_time_ms:
                 logger.error(
                     "3x-ui expiry verification failed for %s: expected=%s actual=%s",
                     email,
