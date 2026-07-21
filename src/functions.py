@@ -516,15 +516,20 @@ class XUIAPI:
 
         client = client_response.get("client")
         if isinstance(client, dict):
-            return dict(client)
+            payload = dict(client)
+        else:
+            # Some 3x-ui versions return the client fields at the top level
+            payload = {
+                key: value
+                for key, value in client_response.items()
+                if key not in {"inboundIds", "externalConfigIds", "traffic"}
+            }
 
-        # Some 3x-ui versions return the client fields at the top level. Drop
-        # wrapper-only fields that are not part of the update payload.
-        return {
-            key: value
-            for key, value in client_response.items()
-            if key not in {"inboundIds", "externalConfigIds", "traffic"}
-        }
+        # Ensure id is always a string (API returns int but expects string)
+        if "id" in payload and not isinstance(payload["id"], str):
+            payload["id"] = str(payload["id"])
+
+        return payload
 
     def _normalize_expiry_time(self, expiry_time: int) -> int:
         if expiry_time < 0:
