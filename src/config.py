@@ -1,3 +1,4 @@
+import json
 import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
@@ -23,6 +24,7 @@ class Config(BaseModel):
     PAYMENT_CARD_NUMBER: str = os.getenv("PAYMENT_CARD_NUMBER", "")
     PAYMENT_CARD_HOLDER: str = os.getenv("PAYMENT_CARD_HOLDER", "")
     PAYMENT_COMMENT_REQUIRED: bool = Field(default=os.getenv("PAYMENT_COMMENT_REQUIRED", "true").lower() == "true")
+    SUBSCRIPTION_PLANS: str = os.getenv("SUBSCRIPTION_PLANS", "")
     INBOUND_ID: int = Field(default=os.getenv("INBOUND_ID", 1))
     INBOUND_IDS: List[int] = Field(default_factory=list)
     BOT_GROUP_NAME: str = os.getenv("BOT_GROUP_NAME", "tg_bot_users")
@@ -108,6 +110,34 @@ class Config(BaseModel):
         discount_percent = price_info["discount_percent"]
         discount_amount = (base_price * discount_percent) // 100
         return base_price - discount_amount
+
+    def get_subscription_plans(self) -> Dict[str, Dict[str, int | str]]:
+        """Return admin-configurable subscription plans for payment orders."""
+        if self.SUBSCRIPTION_PLANS:
+            try:
+                plans = json.loads(self.SUBSCRIPTION_PLANS)
+                parsed_plans = {
+                    str(plan["key"]): {
+                        "label": str(plan["label"]),
+                        "duration_days": int(plan["duration_days"]),
+                        "amount": int(plan["amount"]),
+                    }
+                    for plan in plans
+                    if int(plan.get("duration_days", 0)) > 0 and int(plan.get("amount", 0)) > 0
+                }
+                if parsed_plans:
+                    return parsed_plans
+            except Exception:
+                pass
+
+        return {
+            str(months): {
+                "label": f"{months} мес.",
+                "duration_days": months * 30,
+                "amount": self.calculate_price(months),
+            }
+            for months in sorted(self.PRICES.keys())
+        }
 
 
 config = Config(
