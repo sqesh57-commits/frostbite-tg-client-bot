@@ -112,7 +112,7 @@ reality_loaded=True
 |-----------|----------|--------|
 | `BOT_TOKEN` | Токен Telegram бота от @BotFather | `123456:ABC-DEF...` |
 | `PAYMENT_TOKEN` | Платежный токен от @BotFather | `39054xxxx:LIVE:45xxx` |
-| `ADMINS` | ID администраторов через запятую | `1234567890` |
+| `ADMINS` | Telegram ID администраторов через запятую; добавьте сюда ID администратора бота, чтобы видеть `/orders` и кнопку проверки заказов | `1234567890,987654321` |
 | `XUI_API_URL` | URL API панели 3x-ui (внутренний Docker) | `http://3x-ui-allinone:21443` |
 | `XUI_USERNAME` | Логин панели | `admin` |
 | `XUI_PASSWORD` | Пароль панели | |

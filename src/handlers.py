@@ -121,7 +121,11 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     builder.button(text="✅ Подключить", callback_data="connect")
     builder.button(text="📊 Статистика", callback_data="stats")
     builder.button(text="ℹ️ Помощь", callback_data="help")
-    builder.adjust(2, 2, 1)
+    if is_profile_create_admin(user):
+        builder.button(text="🧾 Заказы на проверку", callback_data="admin_orders")
+        builder.adjust(2, 2, 1)
+    else:
+        builder.adjust(2, 2)
 
     if message_id:
         await bot.edit_message_text(
@@ -508,12 +512,7 @@ async def user_mark_order_paid(callback: CallbackQuery, bot: Bot):
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
 
-@router.message(Command("orders"))
-async def pending_orders_cmd(message: Message):
-    if message.from_user.id not in config.ADMINS:
-        await message.answer("⛔ Команда доступна только администраторам")
-        return
-
+async def send_pending_orders(message: Message):
     orders = await get_pending_orders()
     if not orders:
         await message.answer("✅ Нет заказов, ожидающих проверки")
@@ -533,10 +532,32 @@ async def pending_orders_cmd(message: Message):
         )
 
 
+@router.message(Command("orders"))
+async def pending_orders_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not is_profile_create_admin(user):
+        await message.answer("⛔ Команда доступна только администраторам")
+        return
+
+    await send_pending_orders(message)
+
+
+@router.callback_query(F.data == "admin_orders")
+async def pending_orders_menu(callback: CallbackQuery):
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    if not user or not is_profile_create_admin(user):
+        await callback.message.answer("⛔ Команда доступна только администраторам")
+        return
+
+    await send_pending_orders(callback.message)
+
+
 @router.callback_query(F.data.startswith("admin_approve:"))
 async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     await callback.answer()
-    if callback.from_user.id not in config.ADMINS:
+    admin_user = await get_user(callback.from_user.id)
+    if not admin_user or not is_profile_create_admin(admin_user):
         await callback.message.answer("⛔ Недостаточно прав")
         return
 
