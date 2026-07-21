@@ -5,6 +5,7 @@ import logging
 import uuid
 import random
 import os
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ async def get_user(telegram_id: int):
 
 async def create_user(telegram_id: int, full_name: str, username: str = None, is_admin: bool = False):
     with Session() as session:
-        subscription_end = validate_and_fix_subscription_date(datetime.utcnow() + timedelta(days=3))
+        subscription_end = validate_and_fix_subscription_date(datetime.utcnow() + timedelta(days=config.TRIAL_DAYS))
         user = User(
             telegram_id=telegram_id,
             full_name=full_name,
