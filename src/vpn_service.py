@@ -163,8 +163,9 @@ class VPNService:
                 save_profile(profile)
                 return True
 
-            # Update in 3x-ui
+            # Update in 3x-ui — API requires email in body
             success = await self._api.update_client(profile.xui_email, {
+                "email": profile.xui_email,
                 "expiryTime": new_end_ms,
             })
             if not success:
@@ -238,7 +239,10 @@ class VPNService:
         if not profile.xui_email:
             return False
 
-        success = await self._api.update_client(profile.xui_email, {"enable": False})
+        success = await self._api.update_client(profile.xui_email, {
+            "email": profile.xui_email,
+            "enable": False,
+        })
         if success:
             profile.status = 'disabled'
             save_profile(profile)
