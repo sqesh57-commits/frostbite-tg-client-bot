@@ -113,6 +113,7 @@ File: `src/.env`
 | `BOT_TOKEN` | Telegram bot token from @BotFather | `123456:ABC-DEF...` |
 | `PAYMENT_TOKEN` | Payment token from @BotFather | `39054xxxx:LIVE:45xxx` |
 | `ADMINS` | Telegram admin IDs, comma-separated; add the bot admin ID here to see `/orders` and the order review button | `1234567890,987654321` |
+| `SUBSCRIPTION_PLANS` | Test tariffs for manual order review as JSON with `key`, `label`, `duration_days`, and `amount`; falls back to legacy `PRICES` when empty. | `[{"key":"1w","label":"1 week","duration_days":7,"amount":100},{"key":"1m","label":"1 month","duration_days":30,"amount":270}]` |
 | `XUI_API_URL` | 3x-ui API URL (internal Docker) | `http://3x-ui-allinone:21443` |
 | `XUI_USERNAME` | Panel login | `admin` |
 | `XUI_PASSWORD` | Panel password | |
