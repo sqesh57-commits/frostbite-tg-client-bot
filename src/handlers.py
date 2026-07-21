@@ -12,11 +12,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import config
 from database import (
     get_user, create_user, update_subscription, create_order, mark_order_paid,
-    get_pending_orders, approve_order, get_order,
+    get_pending_orders, approve_order, cancel_order, get_order,
     User, Session
 )
 from functions import (
-    create_vless_profile, generate_vless_url,
+    build_bot_profile_name, create_vless_profile, generate_vless_url,
     get_user_stats, generate_sub_url, update_client_expiry, get_safe_expiry_timestamp,
     force_update_profile_expiry, get_client_links
 )
@@ -101,6 +101,43 @@ def format_user_stats(stats: dict) -> str:
     )
 
 
+def get_order_user(order) -> User | None:
+    with Session() as session:
+        return session.query(User).filter_by(id=order.user_id).first()
+
+
+def get_order_client_name(user: User | None) -> str:
+    if not user:
+        return "—"
+
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    if isinstance(profile_data, dict) and profile_data.get("email"):
+        return profile_data["email"]
+
+    return build_bot_profile_name(user.telegram_id, user.username)
+
+
+def get_order_tariff_label(order) -> str:
+    return order.tariff_label or f"{order.months} мес."
+
+
+def format_admin_order_text(order, user: User | None) -> str:
+    username = f"@{user.username}" if user and user.username else "@—"
+    full_name = user.full_name if user and user.full_name else "—"
+    telegram_id = user.telegram_id if user else "—"
+
+    return (
+        "⏳ Заказ ожидает проверки\n"
+        f"Имя профиля: {full_name} {username}\n"
+        f"Tg Id: {telegram_id}\n"
+        f"Клиент: {get_order_client_name(user)}\n"
+        f"ID: {order.order_uuid}\n"
+        f"Код: {order.payment_code}\n"
+        f"Тариф: {get_order_tariff_label(order)}\n"
+        f"Сумма: {order.amount} ₽"
+    )
+
+
 async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     user = await get_user(chat_id)
     if not user:
@@ -121,7 +158,11 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     builder.button(text="✅ Подключить", callback_data="connect")
     builder.button(text="📊 Статистика", callback_data="stats")
     builder.button(text="ℹ️ Помощь", callback_data="help")
-    builder.adjust(2, 2, 1)
+    if is_profile_create_admin(user):
+        builder.button(text="🧾 Заказы на проверку", callback_data="admin_orders")
+        builder.adjust(2, 2, 1)
+    else:
+        builder.adjust(2, 2)
 
     if message_id:
         await bot.edit_message_text(
@@ -205,14 +246,9 @@ async def renew_cmd(message: Message, bot: Bot):
         return
 
     builder = InlineKeyboardBuilder()
-    for months in sorted(config.PRICES.keys()):
-        price_info = config.PRICES[months]
-        final_price = config.calculate_price(months)
-        discount_text = ""
-        if price_info["discount_percent"] > 0:
-            discount_text = f" (-{price_info['discount_percent']}%)"
-        button_text = f"{months} мес. - {final_price} руб.{discount_text}"
-        builder.button(text=button_text, callback_data=f"pay_{months}")
+    for plan_key, plan in config.get_subscription_plans().items():
+        button_text = f"{plan['label']} - {plan['amount']} руб."
+        builder.button(text=button_text, callback_data=f"pay_{plan_key}")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1)
 
@@ -405,14 +441,9 @@ async def help_msg(callback: CallbackQuery):
 async def renew_subscription(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
 
-    for months in sorted(config.PRICES.keys()):
-        price_info = config.PRICES[months]
-        final_price = config.calculate_price(months)
-        discount_text = ""
-        if price_info["discount_percent"] > 0:
-            discount_text = f" (-{price_info['discount_percent']}%)"
-        button_text = f"{months} мес. - {final_price} руб.{discount_text}"
-        builder.button(text=button_text, callback_data=f"pay_{months}")
+    for plan_key, plan in config.get_subscription_plans().items():
+        button_text = f"{plan['label']} - {plan['amount']} руб."
+        builder.button(text=button_text, callback_data=f"pay_{plan_key}")
 
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(1)
@@ -429,13 +460,24 @@ async def process_payment(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
     try:
-        months = int(callback.data.split("_")[1])
-        if months not in config.PRICES:
+        plan_key = callback.data.split("_", 1)[1]
+        plans = config.get_subscription_plans()
+        plan = plans.get(plan_key)
+        if not plan:
             await callback.message.answer("❌ Неверный период подписки")
             return
 
-        final_price = config.calculate_price(months)
-        order = await create_order(callback.from_user.id, months, final_price)
+        tariff_label = str(plan["label"])
+        duration_days = int(plan["duration_days"])
+        final_price = int(plan["amount"])
+        months = int(plan_key) if str(plan_key).isdigit() else max(duration_days // 30, 0)
+        order = await create_order(
+            callback.from_user.id,
+            months,
+            final_price,
+            duration_days=duration_days,
+            tariff_label=tariff_label,
+        )
         if not order:
             await callback.message.answer("❌ Не удалось создать заказ. Нажмите /start и попробуйте снова.")
             return
@@ -451,7 +493,7 @@ async def process_payment(callback: CallbackQuery, bot: Bot):
         text = (
             "🧾 **Заказ создан**\n\n"
             f"ID заказа: `{order.order_uuid}`\n"
-            f"Тариф: `{months}` мес.\n"
+            f"Тариф: `{tariff_label}`\n"
             f"Сумма: `{final_price}` ₽\n\n"
             "💳 **Реквизиты для перевода**\n"
             f"Карта: `{card_number}`\n"
@@ -492,51 +534,60 @@ async def user_mark_order_paid(callback: CallbackQuery, bot: Bot):
     for admin_id in config.ADMINS:
         try:
             user = await get_user(callback.from_user.id)
-            admin_text = (
-                "🔔 **Новый платеж на проверку**\n\n"
-                f"Пользователь: `{user.full_name}` | `{user.telegram_id}`\n"
-                f"Username: @{user.username or '—'}\n"
-                f"ID заказа: `{order.order_uuid}`\n"
-                f"Код платежа: `{order.payment_code}`\n"
-                f"Тариф: `{order.months}` мес.\n"
-                f"Сумма: `{order.amount}` ₽"
-            )
+            admin_text = format_admin_order_text(order, user)
             builder = InlineKeyboardBuilder()
             builder.button(text="✅ Подтвердить", callback_data=f"admin_approve:{order.order_uuid}")
-            await bot.send_message(admin_id, admin_text, parse_mode='Markdown', reply_markup=builder.as_markup())
+            builder.button(text="❌ Отмена", callback_data=f"admin_cancel:{order.order_uuid}")
+            builder.adjust(1)
+            await bot.send_message(admin_id, admin_text, reply_markup=builder.as_markup())
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
 
-@router.message(Command("orders"))
-async def pending_orders_cmd(message: Message):
-    if message.from_user.id not in config.ADMINS:
-        await message.answer("⛔ Команда доступна только администраторам")
-        return
-
+async def send_pending_orders(message: Message):
     orders = await get_pending_orders()
     if not orders:
         await message.answer("✅ Нет заказов, ожидающих проверки")
         return
 
     for order in orders:
+        user = get_order_user(order)
         builder = InlineKeyboardBuilder()
         builder.button(text="✅ Подтвердить", callback_data=f"admin_approve:{order.order_uuid}")
+        builder.button(text="❌ Отмена", callback_data=f"admin_cancel:{order.order_uuid}")
+        builder.adjust(1)
         await message.answer(
-            "⏳ **Заказ ожидает проверки**\n\n"
-            f"ID: `{order.order_uuid}`\n"
-            f"Код: `{order.payment_code}`\n"
-            f"Тариф: `{order.months}` мес.\n"
-            f"Сумма: `{order.amount}` ₽",
-            parse_mode='Markdown',
+            format_admin_order_text(order, user),
             reply_markup=builder.as_markup()
         )
+
+
+@router.message(Command("orders"))
+async def pending_orders_cmd(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not is_profile_create_admin(user):
+        await message.answer("⛔ Команда доступна только администраторам")
+        return
+
+    await send_pending_orders(message)
+
+
+@router.callback_query(F.data == "admin_orders")
+async def pending_orders_menu(callback: CallbackQuery):
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    if not user or not is_profile_create_admin(user):
+        await callback.message.answer("⛔ Команда доступна только администраторам")
+        return
+
+    await send_pending_orders(callback.message)
 
 
 @router.callback_query(F.data.startswith("admin_approve:"))
 async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     await callback.answer()
-    if callback.from_user.id not in config.ADMINS:
+    admin_user = await get_user(callback.from_user.id)
+    if not admin_user or not is_profile_create_admin(admin_user):
         await callback.message.answer("⛔ Недостаточно прав")
         return
 
@@ -564,7 +615,7 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     if user:
         await bot.send_message(
             user.telegram_id,
-            f"✅ Оплата подтверждена! Подписка продлена на {order.months} мес.\n"
+            f"✅ Оплата подтверждена! Подписка продлена на {get_order_tariff_label(order)}\n"
             f"Новая дата окончания: `{user.subscription_end.strftime('%d-%m-%Y %H:%M')}`",
             parse_mode='Markdown'
         )
@@ -573,6 +624,39 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
         "✅ **Заказ подтвержден**\n\n"
         f"ID: `{order.order_uuid}`\n"
         f"Код: `{order.payment_code}`\n"
+        f"Тариф: `{get_order_tariff_label(order)}`\n"
+        f"Сумма: `{order.amount}` ₽",
+        parse_mode='Markdown'
+    )
+
+
+@router.callback_query(F.data.startswith("admin_cancel:"))
+async def admin_cancel_order(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    admin_user = await get_user(callback.from_user.id)
+    if not admin_user or not is_profile_create_admin(admin_user):
+        await callback.message.answer("⛔ Недостаточно прав")
+        return
+
+    order_uuid = callback.data.split(":", 1)[1]
+    order_before = await get_order(order_uuid)
+    order = await cancel_order(order_uuid, callback.from_user.id)
+    if not order or not order_before:
+        await callback.message.answer("❌ Заказ не найден или уже обработан")
+        return
+
+    user = get_order_user(order)
+    if user:
+        await bot.send_message(
+            user.telegram_id,
+            "❌ Платеж не подтвержден. Если вы уже оплатили заказ, обратитесь в поддержку."
+        )
+
+    await callback.message.edit_text(
+        "❌ **Заказ отменен**\n\n"
+        f"ID: `{order.order_uuid}`\n"
+        f"Код: `{order.payment_code}`\n"
+        f"Тариф: `{get_order_tariff_label(order)}`\n"
         f"Сумма: `{order.amount}` ₽",
         parse_mode='Markdown'
     )

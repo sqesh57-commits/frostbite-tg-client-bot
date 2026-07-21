@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey, func, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta, timezone
 import logging
@@ -49,6 +49,8 @@ class Order(Base):
     vpn_profile_id = Column(Integer, ForeignKey('vpn_profiles.id'), nullable=True, index=True)
     months = Column(Integer, nullable=False)
     amount = Column(Integer, nullable=False)
+    duration_days = Column(Integer)
+    tariff_label = Column(String)
     payment_code = Column(String, unique=True, nullable=False, index=True)
     status = Column(String, default='created', index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -80,7 +82,21 @@ def to_naive_utc(dt) -> datetime | None:
 
 async def init_db():
     Base.metadata.create_all(engine)
+    ensure_order_columns()
     logger.info("Database tables created")
+
+
+def ensure_order_columns():
+    """Add order columns used by configurable test tariffs to existing SQLite DBs."""
+    existing_columns = {column["name"] for column in inspect(engine).get_columns("orders")}
+    migrations = {
+        "duration_days": "ALTER TABLE orders ADD COLUMN duration_days INTEGER",
+        "tariff_label": "ALTER TABLE orders ADD COLUMN tariff_label VARCHAR",
+    }
+    with engine.begin() as connection:
+        for column_name, statement in migrations.items():
+            if column_name not in existing_columns:
+                connection.execute(text(statement))
 
 
 async def get_user(telegram_id: int):
@@ -207,7 +223,13 @@ async def get_or_create_default_vpn_profile(user: User):
         return profile
 
 
-async def create_order(telegram_id: int, months: int, amount: int):
+async def create_order(
+    telegram_id: int,
+    months: int,
+    amount: int,
+    duration_days: int | None = None,
+    tariff_label: str | None = None,
+):
     with Session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
@@ -238,6 +260,8 @@ async def create_order(telegram_id: int, months: int, amount: int):
             vpn_profile_id=profile.id,
             months=months,
             amount=amount,
+            duration_days=duration_days or months * 30,
+            tariff_label=tariff_label or f"{months} мес.",
             payment_code=payment_code,
             status='created',
         )
@@ -268,6 +292,18 @@ async def get_pending_orders():
         return session.query(Order).filter_by(status='pending_review').order_by(Order.paid_at.asc()).all()
 
 
+async def cancel_order(order_uuid: str, admin_telegram_id: int):
+    with Session() as session:
+        order = session.query(Order).filter_by(order_uuid=order_uuid).first()
+        if not order or order.status != 'pending_review':
+            return None
+        order.status = 'cancelled'
+        order.verified_at = datetime.utcnow()
+        order.verified_by = admin_telegram_id
+        session.commit()
+        return order
+
+
 async def approve_order(order_uuid: str, admin_telegram_id: int):
     with Session() as session:
         order = session.query(Order).filter_by(order_uuid=order_uuid).first()
@@ -280,10 +316,11 @@ async def approve_order(order_uuid: str, admin_telegram_id: int):
 
         now = datetime.utcnow()
         user.subscription_end = validate_and_fix_subscription_date(user.subscription_end).replace(tzinfo=None)
+        duration_days = order.duration_days or order.months * 30
         if user.subscription_end > now:
-            user.subscription_end += timedelta(days=order.months * 30)
+            user.subscription_end += timedelta(days=duration_days)
         else:
-            user.subscription_end = now + timedelta(days=order.months * 30)
+            user.subscription_end = now + timedelta(days=duration_days)
         user.subscription_end = validate_and_fix_subscription_date(user.subscription_end).replace(tzinfo=None)
         user.notified = False
 
