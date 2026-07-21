@@ -497,32 +497,74 @@ class XUIAPI:
             logger.exception(f"Create profile error: {e}")
             return None
 
-    async def update_client_expiry(self, email: str, expiry_time: int):
+    def _extract_client_payload(self, client_response: dict | None) -> dict | None:
+        """Return the editable client payload from /clients/get response.
+
+        3x-ui's /clients/update/{email} endpoint replaces the whole client row,
+        so callers must submit the full client object instead of a partial patch.
+        Depending on the panel version, /clients/get can return either the client
+        object directly or wrap it into {"client": {...}, "inboundIds": [...]}.
+        """
+        if not isinstance(client_response, dict):
+            return None
+
+        client = client_response.get("client")
+        if isinstance(client, dict):
+            return dict(client)
+
+        # Some 3x-ui versions return the client fields at the top level. Drop
+        # wrapper-only fields that are not part of the update payload.
+        return {
+            key: value
+            for key, value in client_response.items()
+            if key not in {"inboundIds", "externalConfigIds", "traffic"}
+        }
+
+    def _normalize_expiry_time(self, expiry_time: int) -> int:
         if expiry_time < 0:
             expiry_time = 0
+        if expiry_time < 1577836800:
+            return 0
+        if expiry_time > 2000000000:
+            return 0
+        return expiry_time
 
+    async def update_client_expiry(self, email: str, expiry_time: int):
         try:
-            final_expiry_time = expiry_time
-            if expiry_time < 1577836800:
-                final_expiry_time = 0
-            elif expiry_time > 2000000000:
-                final_expiry_time = 0
-
-            # Use client-specific API
-            client_data = {
-                "expiryTime": final_expiry_time * 1000,
-            }
+            final_expiry_time = self._normalize_expiry_time(expiry_time)
+            expiry_time_ms = final_expiry_time * 1000
 
             if config.BOT_DRY_RUN:
                 logger.info(f"DRY RUN: Would update expiry for {email} to {final_expiry_time}")
                 return True
 
+            existing_client = await self.get_client(email)
+            client_data = self._extract_client_payload(existing_client)
+            if not client_data:
+                logger.error(f"Cannot update expiry for {email}: client not found in 3x-ui")
+                return False
+
+            client_data["expiryTime"] = expiry_time_ms
+            client_data["enable"] = True
+
             success = await self.update_client(email, client_data)
-            if success:
-                logger.info(f"Client expiry updated: {email}")
-            else:
+            if not success:
                 logger.error(f"Failed to update expiry for {email}")
-            return success
+                return False
+
+            updated_client = self._extract_client_payload(await self.get_client(email))
+            updated_expiry = updated_client.get("expiryTime") if updated_client else None
+            if updated_expiry != expiry_time_ms:
+                logger.error(
+                    "3x-ui expiry verification failed for %s: expected=%s actual=%s",
+                    email,
+                    expiry_time_ms,
+                    updated_expiry,
+                )
+                return False
+
+            logger.info(f"Client expiry updated: {email}")
+            return True
         except Exception as e:
             logger.exception(f"Update client expiry error: {e}")
             return False
