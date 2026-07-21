@@ -346,23 +346,30 @@ async def approve_order(order_uuid: str, admin_telegram_id: int):
             id=order.vpn_profile_id
         ).first() if order.vpn_profile_id else None
 
-        now = datetime.utcnow()
-        user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
+        if not profile:
+            logger.error(f"approve_order: no VPN profile for order {order_uuid}")
+            return None
+
         duration_days = order.duration_days or order.months * 30
 
-        if user.subscription_end > now:
-            user.subscription_end += timedelta(days=duration_days)
-        else:
-            user.subscription_end = now + timedelta(days=duration_days)
+        from vpn_service import VPNService
+        vpn_service = VPNService()
+        try:
+            renewed = await vpn_service.renew_vpn_profile(profile, duration_days)
+        finally:
+            await vpn_service.close()
 
-        user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
+        if not renewed:
+            logger.error(f"approve_order: VPN renewal failed for order {order_uuid}")
+            return None
+
+        # VPNService updated profile.subscription_end; sync to user
+        now = datetime.utcnow()
+        user.subscription_end = profile.subscription_end
         user.notified = False
         user.notified_3d = False
         user.notified_1d = False
         user.notified_3h = False
-
-        if profile:
-            profile.subscription_end = user.subscription_end
 
         order.status = 'approved'
         order.verified_at = now

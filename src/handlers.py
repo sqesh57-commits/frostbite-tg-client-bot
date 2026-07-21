@@ -216,11 +216,15 @@ async def show_menu(bot: Bot, chat_id: int, message_id: int = None):
     status = "Активна" if user.subscription_end > datetime.utcnow() else "Истекла"
     expire_date = user.subscription_end.strftime("%d-%m-%Y %H:%M") if status == "Активна" else status
 
+    _, profile = await get_profile_by_user(user.telegram_id)
+    profile_status = "✅ Создан" if profile and profile.xui_email else "❌ Не создан"
+
     text = (
         f"**Имя профиля**: `{user.full_name}`\n"
         f"**Id**: `{user.telegram_id}`\n"
         f"**Подписка**: `{status}`\n"
-        f"**Дата окончания подписки**: `{expire_date}`"
+        f"**Дата окончания подписки**: `{expire_date}`\n"
+        f"**VPN профиль**: `{profile_status}`"
     )
 
     builder = InlineKeyboardBuilder()
@@ -438,18 +442,17 @@ async def connect_cmd(message: Message, bot: Bot):
 @router.message(Command("stats"))
 async def stats_cmd(message: Message, bot: Bot):
     user = await get_user(message.from_user.id)
-    if not user or not user.vless_profile_data:
+    if not user:
+        await message.answer("⚠️ Профиль не создан")
+        return
+
+    _, profile = await get_profile_by_user(user.telegram_id)
+    if not profile or not profile.xui_email:
         await message.answer("⚠️ Профиль не создан")
         return
 
     await message.answer("⚙️ Загружаем вашу статистику...")
-    profile_data = safe_json_loads(user.vless_profile_data, default={})
-    profile_data, email = await sync_profile_state_with_xui(user, profile_data)
-    if not email:
-        await message.answer("⚠️ Профиль не найден в 3x-ui. Нажмите «Подключить», чтобы создать его заново.")
-        return
-
-    stats = await get_user_stats(email)
+    stats = await get_user_stats(profile.xui_email)
     if not stats:
         await message.answer("⚠️ Не удалось получить статистику. Попробуйте позже")
         return
@@ -460,7 +463,6 @@ async def stats_cmd(message: Message, bot: Bot):
     builder.button(text="⬅️ В меню", callback_data="back_to_menu")
 
     await message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
-
 
 @router.message(Command("help"))
 async def help_cmd(message: Message, bot: Bot):
@@ -812,6 +814,8 @@ async def process_successful_payment(message: Message, bot: Bot):
 
 @router.callback_query(F.data == "connect")
 async def connect_profile(callback: CallbackQuery):
+    from vpn_service import VPNService
+
     user = await get_user(callback.from_user.id)
     if not user:
         await callback.answer("🛑 Ошибка профиля")
@@ -821,125 +825,92 @@ async def connect_profile(callback: CallbackQuery):
         await callback.answer("⚠️ Подписка истекла! Продлите подписку.")
         return
 
-    if not user.vless_profile_data:
-        can_create, deny_message, deny_reason = validate_profile_create(user)
-        if not can_create:
-            await deny_profile_create(callback.message, user, deny_reason, deny_message)
-            await callback.answer()
-            return
+    vpn = VPNService()
+    try:
+        _, profile = await get_profile_by_user(user.telegram_id)
 
-        await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
-        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
+        if profile and profile.xui_email:
+            if not await vpn.verify_vpn_profile(profile):
+                logger.warning(f"Client {profile.xui_email} missing from 3x-ui, syncing...")
+                profile = await vpn.sync_vpn_profile(profile, user)
 
-        if profile_data:
-            with Session() as session:
-                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                if db_user:
-                    db_user.vless_profile_data = json.dumps(profile_data)
-                    session.commit()
-            user = await get_user(user.telegram_id)
-        else:
-            await callback.message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
-            return
+        if not profile or profile.status != 'active':
+            can_create, deny_message, deny_reason = validate_profile_create(user)
+            if not can_create:
+                await deny_profile_create(callback.message, user, deny_reason, deny_message)
+                await callback.answer()
+                return
 
-    profile_data = safe_json_loads(user.vless_profile_data, default={})
-    if not profile_data:
-        await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
-        return
+            await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
+            profile = await vpn.register_vpn_profile(user)
 
-    profile_data, _email = await sync_profile_state_with_xui(user, profile_data)
-    if not profile_data:
-        user = await get_user(user.telegram_id)
+            if not profile:
+                await callback.message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
+                return
 
-    if not profile_data:
-        can_create, deny_message, deny_reason = validate_profile_create(user)
-        if not can_create:
-            await deny_profile_create(callback.message, user, deny_reason, deny_message)
-            await callback.answer()
-            return
+        sub_url = generate_sub_url(profile.xui_sub_id) if profile.xui_sub_id else ""
 
-        await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
-        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-        profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
+        # Get VLESS link from 3x-ui API
+        vless_url = ""
+        if profile.xui_sub_id:
+            links = await get_client_links(profile.xui_sub_id)
+            for link in links:
+                if isinstance(link, str) and link.startswith("vless://"):
+                    vless_url = link
+                    break
+        if not vless_url:
+            vless_url = sub_url
 
-        if profile_data:
-            with Session() as session:
-                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
-                if db_user:
-                    db_user.vless_profile_data = json.dumps(profile_data)
-                    session.commit()
-            user = await get_user(user.telegram_id)
-        else:
-            await callback.message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
-            return
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(sub_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
 
-    if not profile_data:
-        await callback.message.answer("⚠️ Не удалось создать профиль.")
-        return
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
 
-    sub_id = profile_data.get("sub_id")
-    sub_url = generate_sub_url(sub_id) if sub_id else ""
+        text = (
+            "📲 Как подключить VPN\n"
+            "1. Нажмите кнопку «Подключиться» или отсканируйте QR код\n"
+            "Откроется страница с вашим VPN-профилем.\n\n"
+            "2. Пролистайте страницу вниз\n"
+            "Найдите кнопки с вашей операционной системой:\n"
+            "📱 Android\n"
+            "🍏 iPhone (iOS)\n\n"
+            "3. Выберите свою систему\n"
+            "Откроется список приложений.\n"
+            "👉 Выберите любое приложение из списка.\n\n"
+            "4. Установите приложение\n"
+            "Если оно не установлено — скачайте его.\n\n"
+            "5. Нажмите на выбранное приложение ещё раз\n\n"
+            "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
+            "6. Подключитесь к VPN\n"
+            "Откроется приложение — нажмите:\n"
+            "👉 Подключиться / Connect\n\n"
+            "✅ Готово\n"
+            "VPN включён — интернет работает без ограничений 🚀\n\n"
+            "💡 Если не получилось\n"
+            "попробуйте другое приложение из списка\n"
+            "или заново нажмите «Подключиться» в боте"
+        )
 
-    # Get VLESS link from 3x-ui API
-    vless_url = ""
-    if sub_id:
-        links = await get_client_links(sub_id)
-        for link in links:
-            if isinstance(link, str) and link.startswith("vless://"):
-                vless_url = link
-                break
-    if not vless_url:
-        vless_url = sub_url
+        builder = InlineKeyboardBuilder()
+        builder.button(text='Подключится', url=sub_url)
+        builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+        builder.adjust(1, 1)
 
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(sub_url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption=text,
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
+        )
+        await callback.message.delete()
 
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
-    photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
-
-    text = (
-        "📲 Как подключить VPN\n"
-        "1. Нажмите кнопку «Подключиться» или отсканируйте QR код\n"
-        "Откроется страница с вашим VPN-профилем.\n\n"
-        "2. Пролистайте страницу вниз\n"
-        "Найдите кнопки с вашей операционной системой:\n"
-        "📱 Android\n"
-        "🍏 iPhone (iOS)\n\n"
-        "3. Выберите свою систему\n"
-        "Откроется список приложений.\n"
-        "👉 Выберите любое приложение из списка.\n\n"
-        "4. Установите приложение\n"
-        "Если оно не установлено — скачайте его.\n\n"
-        "5. Нажмите на выбранное приложение ещё раз\n\n"
-        "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
-        "6. Подключитесь к VPN\n"
-        "Откроется приложение — нажмите:\n"
-        "👉 Подключиться / Connect\n\n"
-        "✅ Готово\n"
-        "VPN включён — интернет работает без ограничений 🚀\n\n"
-        "💡 Если не получилось\n"
-        "попробуйте другое приложение из списка\n"
-        "или заново нажмите «Подключиться» в боте"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.button(text='Подключится', url=sub_url)
-    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
-    builder.adjust(1, 1)
-
-    await callback.message.answer_photo(
-        photo=photo,
-        caption=text,
-        reply_markup=builder.as_markup(),
-        parse_mode='Markdown'
-    )
-    await callback.message.delete()
-
+    finally:
+        await vpn.close()
 
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):

@@ -83,6 +83,7 @@ async def setup_bot_commands(bot: Bot):
     admin_commands = [
         *user_commands,
         BotCommand(command="orders", description="🧾 Заказы на проверку"),
+        BotCommand(command="sync_profiles", description="🔄 Синхронизация профилей VPN"),
     ]
 
     try:
