@@ -218,6 +218,22 @@ docker compose exec frostbite-tg-client-bot python check_xui.py
 - Парсинг Reality settings
 - Вывод safe summary (ключ замаскирован)
 
+### Очистка тестовой БД бота
+
+Для тестирования можно удалить `users.db` прямо внутри контейнера. Скрипт удаляет сам файл SQLite и sidecar-файлы (`-wal`, `-shm`, `-journal`), затем перезапускает контейнер, чтобы бот создал пустую схему заново.
+
+```bash
+./reset_db.sh
+```
+
+Если контейнер или путь к БД отличаются:
+
+```bash
+./reset_db.sh --container frostbite-tg-client-bot --db-path /app/data/users.db
+```
+
+> Используйте только в тестовом окружении: данные пользователей будут удалены без восстановления.
+
 ### Проверка из Telegram
 
 ```
