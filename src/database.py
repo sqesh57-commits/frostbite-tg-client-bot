@@ -264,12 +264,36 @@ def save_user(user):
         session.commit()
 
 
+async def get_active_order_for_user(telegram_id: int):
+    with Session() as session:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if not user:
+            return None
+
+        return session.query(Order).filter(
+            Order.user_id == user.id,
+            Order.status.in_(['created', 'pending_review', 'processing']),
+        ).order_by(Order.created_at.desc()).first()
+
+
 async def create_order(telegram_id: int, months: int, amount: int,
                        duration_days: int | None = None, tariff_label: str | None = None):
     with Session() as session:
         user = session.query(User).filter_by(telegram_id=telegram_id).first()
         if not user:
             return None
+
+        existing_order = session.query(Order).filter(
+            Order.user_id == user.id,
+            Order.status.in_(['created', 'pending_review', 'processing']),
+        ).order_by(Order.created_at.desc()).first()
+        if existing_order:
+            logger.info(
+                "create_order: duplicate active order blocked for user %s: %s",
+                telegram_id,
+                existing_order.order_uuid,
+            )
+            return existing_order
 
         profile = session.query(VPNProfile).filter_by(
             user_id=user.id, is_active=True
@@ -335,12 +359,16 @@ async def cancel_order(order_uuid: str, admin_telegram_id: int):
 async def approve_order(order_uuid: str, admin_telegram_id: int):
     with Session() as session:
         order = session.query(Order).filter_by(order_uuid=order_uuid).first()
-        if not order or order.status != 'pending_review':
-            return None
+        if not order:
+            return None, 'not_found'
+        if order.status == 'processing':
+            return order, 'processing'
+        if order.status != 'pending_review':
+            return order, 'already_processed'
 
         user = session.query(User).filter_by(id=order.user_id).first()
         if not user:
-            return None
+            return None, 'user_not_found'
 
         profile = session.query(VPNProfile).filter_by(
             id=order.vpn_profile_id
@@ -348,22 +376,35 @@ async def approve_order(order_uuid: str, admin_telegram_id: int):
 
         if not profile:
             logger.error(f"approve_order: no VPN profile for order {order_uuid}")
-            return None
+            return order, 'profile_not_found'
+
+        order.status = 'processing'
+        order.verified_by = admin_telegram_id
+        session.commit()
 
         duration_days = order.duration_days or order.months * 30
 
-        from vpn_service import VPNService
-        vpn_service = VPNService()
-        try:
-            renewed = await vpn_service.renew_vpn_profile(profile, duration_days)
-        finally:
-            await vpn_service.close()
+    from vpn_service import VPNService
+    vpn_service = VPNService()
+    try:
+        renewed = await vpn_service.renew_vpn_profile(profile, duration_days)
+    finally:
+        await vpn_service.close()
+
+    with Session() as session:
+        order = session.query(Order).filter_by(order_uuid=order_uuid).first()
+        user = session.query(User).filter_by(id=order.user_id).first() if order else None
+        profile = session.query(VPNProfile).filter_by(id=profile.id).first() if profile else None
+
+        if not order or not user or not profile:
+            return order, 'not_found'
 
         if not renewed:
             logger.error(f"approve_order: VPN renewal failed for order {order_uuid}")
-            return None
+            order.status = 'pending_review'
+            session.commit()
+            return order, 'renewal_failed'
 
-        # VPNService updated profile.subscription_end; sync to user
         now = datetime.utcnow()
         user.subscription_end = profile.subscription_end
         user.notified = False
@@ -375,7 +416,7 @@ async def approve_order(order_uuid: str, admin_telegram_id: int):
         order.verified_at = now
         order.verified_by = admin_telegram_id
         session.commit()
-        return order
+        return order, 'approved'
 
 
 # ─── Legacy helpers (used by app.py) ───────────────────────────────────────

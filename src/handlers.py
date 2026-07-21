@@ -13,7 +13,7 @@ from config import config
 from database import (
     get_user, create_user, create_order, mark_order_paid,
     get_pending_orders, approve_order, cancel_order, get_order,
-    get_profile_by_user, save_profile, save_user,
+    get_profile_by_user, save_profile, save_user, get_active_order_for_user,
     User, Session, VPNProfile
 )
 from functions import (
@@ -29,6 +29,8 @@ router = Router()
 MAX_MESSAGE_LENGTH = 4096
 
 profile_create_attempts: dict[int, float] = {}
+order_create_attempts: dict[int, float] = {}
+ORDER_CREATE_RATE_LIMIT_SECONDS = 30
 
 
 def is_admin_telegram_id(telegram_id: int) -> bool:
@@ -517,6 +519,21 @@ async def process_payment(callback: CallbackQuery, bot: Bot):
         duration_days = int(plan["duration_days"])
         final_price = int(plan["amount"])
         months = int(plan_key) if str(plan_key).isdigit() else max(duration_days // 30, 0)
+        now = time.monotonic()
+        last_attempt = order_create_attempts.get(callback.from_user.id)
+        if last_attempt is not None and now - last_attempt < ORDER_CREATE_RATE_LIMIT_SECONDS:
+            active_order = await get_active_order_for_user(callback.from_user.id)
+            if active_order:
+                await callback.message.answer(
+                    "⏳ У вас уже есть заказ на продление. "
+                    "Проверьте оплату или дождитесь подтверждения администратора.\n\n"
+                    f"ID заказа: `{active_order.order_uuid}`\n"
+                    f"Код платежа: `{active_order.payment_code}`",
+                    parse_mode='Markdown',
+                )
+                return
+
+        order_create_attempts[callback.from_user.id] = now
         order = await create_order(
             callback.from_user.id,
             months,
@@ -536,17 +553,18 @@ async def process_payment(callback: CallbackQuery, bot: Bot):
             f"\n🔎 Код платежа для сверки: `{order.payment_code}`"
         )
 
+        order_status_title = "🧾 **Заказ создан**" if order.status == 'created' else "⏳ **У вас уже есть активный заказ**"
         text = (
-            "🧾 **Заказ создан**\n\n"
+            f"{order_status_title}\n\n"
             f"ID заказа: `{order.order_uuid}`\n"
-            f"Тариф: `{tariff_label}`\n"
-            f"Сумма: `{final_price}` ₽\n\n"
+            f"Тариф: `{get_order_tariff_label(order)}`\n"
+            f"Сумма: `{order.amount}` ₽\n\n"
             "💳 **Реквизиты для перевода**\n"
             f"Карта: `{card_number}`\n"
             f"Получатель: `{card_holder}`"
             f"{comment_line}\n\n"
             "После перевода нажмите кнопку **Я оплатил**. "
-            "Администратор проверит поступление и продлит VPN вручную."
+            "Администратор проверит поступление и продлит VPN."
         )
 
         builder = InlineKeyboardBuilder()
@@ -639,8 +657,23 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
 
     order_uuid = callback.data.split(":", 1)[1]
     order_before = await get_order(order_uuid)
-    order = await approve_order(order_uuid, callback.from_user.id)
-    if not order or not order_before:
+    if order_before and order_before.status == 'processing':
+        await callback.message.answer("⏳ Заказ уже продлевается. Дождитесь результата.")
+        return
+
+    try:
+        await callback.message.edit_text("⏳ Продлеваем клиента в 3x-ui, подождите...")
+    except Exception:
+        pass
+
+    order, approve_status = await approve_order(order_uuid, callback.from_user.id)
+    if approve_status == 'processing':
+        await callback.message.answer("⏳ Заказ уже продлевается. Дождитесь результата.")
+        return
+    if approve_status == 'renewal_failed':
+        await callback.message.answer("❌ Не удалось продлить клиента в 3x-ui. Заказ оставлен на проверке, попробуйте подтвердить позже.")
+        return
+    if approve_status != 'approved' or not order or not order_before:
         await callback.message.answer("❌ Заказ не найден или уже обработан")
         return
 

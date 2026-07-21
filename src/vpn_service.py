@@ -13,7 +13,7 @@ from database import (
     Session, User, VPNProfile, get_active_profile, save_profile, save_user,
     validate_and_fix_subscription_date,
 )
-from functions import XUIAPI, build_bot_profile_name
+from functions import XUIAPI, build_bot_profile_name, get_safe_expiry_timestamp
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ class VPNService:
             else:
                 new_end = now + timedelta(days=days)
 
-            new_end_ms = int(new_end.timestamp() * 1000)
+            new_end_ms = get_safe_expiry_timestamp(new_end) * 1000
 
             if config.BOT_DRY_RUN:
                 logger.info(f"DRY RUN: would renew {profile.xui_email} by {days} days → {new_end}")
@@ -163,12 +163,15 @@ class VPNService:
                 save_profile(profile)
                 return True
 
-            # Update in 3x-ui — API accepts partial update with minimal fields
-            success = await self._api.update_client(profile.xui_email, {
-                "email": profile.xui_email,
-                "expiryTime": new_end_ms,
-                "enable": True,
-            })
+            client_payload = self._api._extract_client_payload(client)
+            if not client_payload:
+                logger.error(f"Cannot build update payload for {profile.xui_email}")
+                return False
+
+            client_payload["expiryTime"] = new_end_ms
+            client_payload["enable"] = True
+
+            success = await self._api.update_client(profile.xui_email, client_payload)
             if not success:
                 logger.error(f"Failed to update expiry for {profile.xui_email}")
                 return False
@@ -179,7 +182,8 @@ class VPNService:
                 logger.error(f"Client {profile.xui_email} not found after renewal update")
                 return False
 
-            verified_expiry = verified.get("expiryTime", 0)
+            verified_payload = self._api._extract_client_payload(verified) or verified
+            verified_expiry = int(verified_payload.get("expiryTime", 0) or 0)
             if verified_expiry < new_end_ms - 1000:
                 logger.error(
                     f"Expiry verification failed: expected >={new_end_ms}, got {verified_expiry}"
