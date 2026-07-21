@@ -508,8 +508,7 @@ class XUIAPI:
 
         3x-ui's /clients/update/{email} endpoint replaces the whole client row,
         so callers must submit the full client object instead of a partial patch.
-        Depending on the panel version, /clients/get can return either the client
-        object directly or wrap it into {"client": {...}, "inboundIds": [...]}.
+        Types are sanitized to match what the update endpoint expects.
         """
         if not isinstance(client_response, dict):
             return None
@@ -518,16 +517,19 @@ class XUIAPI:
         if isinstance(client, dict):
             payload = dict(client)
         else:
-            # Some 3x-ui versions return the client fields at the top level
             payload = {
                 key: value
                 for key, value in client_response.items()
                 if key not in {"inboundIds", "externalConfigIds", "traffic"}
             }
 
-        # Ensure id is always a string (API returns int but expects string)
+        # Sanitize types for update endpoint
         if "id" in payload and not isinstance(payload["id"], str):
             payload["id"] = str(payload["id"])
+        if "allowedIPs" in payload and isinstance(payload["allowedIPs"], str):
+            payload["allowedIPs"] = []
+        if "subId" in payload and not isinstance(payload["subId"], str):
+            payload["subId"] = str(payload["subId"])
 
         return payload
 

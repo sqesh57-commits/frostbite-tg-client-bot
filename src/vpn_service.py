@@ -163,13 +163,23 @@ class VPNService:
                 save_profile(profile)
                 return True
 
-            # Update in 3x-ui — send only fields that need changing + email
-            # Full object replacement causes type mismatches (allowedIPs etc)
-            success = await self._api.update_client(profile.xui_email, {
-                "email": profile.xui_email,
-                "expiryTime": new_end_ms,
-                "enable": True,
-            })
+            # Update in 3x-ui — API replaces full object, must fix types
+            # Get full client, sanitize types, update expiryTime, send back
+            client_payload = self._api._extract_client_payload(client)
+            if not client_payload:
+                logger.error(f"Cannot extract client payload for {profile.xui_email}")
+                return False
+
+            # Fix type mismatches between GET and UPDATE
+            if "id" in client_payload and not isinstance(client_payload["id"], str):
+                client_payload["id"] = str(client_payload["id"])
+            if "allowedIPs" in client_payload and isinstance(client_payload["allowedIPs"], str):
+                client_payload["allowedIPs"] = []
+            if "subId" in client_payload and not isinstance(client_payload["subId"], str):
+                client_payload["subId"] = str(client_payload["subId"])
+
+            client_payload["expiryTime"] = new_end_ms
+            success = await self._api.update_client(profile.xui_email, client_payload)
             if not success:
                 logger.error(f"Failed to update expiry for {profile.xui_email}")
                 return False
@@ -241,10 +251,22 @@ class VPNService:
         if not profile.xui_email:
             return False
 
-        success = await self._api.update_client(profile.xui_email, {
-            "email": profile.xui_email,
-            "enable": False,
-        })
+        client = await self._api.get_client(profile.xui_email)
+        if not client:
+            return False
+
+        client_payload = self._api._extract_client_payload(client)
+        if not client_payload:
+            return False
+
+        # Fix type mismatches
+        if "id" in client_payload and not isinstance(client_payload["id"], str):
+            client_payload["id"] = str(client_payload["id"])
+        if "allowedIPs" in client_payload and isinstance(client_payload["allowedIPs"], str):
+            client_payload["allowedIPs"] = []
+
+        client_payload["enable"] = False
+        success = await self._api.update_client(profile.xui_email, client_payload)
         if success:
             profile.status = 'disabled'
             save_profile(profile)
