@@ -112,7 +112,7 @@ File: `src/.env`
 |----------|-------------|---------|
 | `BOT_TOKEN` | Telegram bot token from @BotFather | `123456:ABC-DEF...` |
 | `PAYMENT_TOKEN` | Payment token from @BotFather | `39054xxxx:LIVE:45xxx` |
-| `ADMINS` | Admin IDs, comma-separated | `1234567890` |
+| `ADMINS` | Telegram admin IDs, comma-separated; add the bot admin ID here to see `/orders` and the order review button | `1234567890,987654321` |
 | `XUI_API_URL` | 3x-ui API URL (internal Docker) | `http://3x-ui-allinone:21443` |
 | `XUI_USERNAME` | Panel login | `admin` |
 | `XUI_PASSWORD` | Panel password | |
