@@ -4,7 +4,7 @@ import logging
 import coloredlogs
 from config import config
 from aiogram import Bot, Dispatcher
-from aiogram.types import PreCheckoutQuery
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault, PreCheckoutQuery
 from handlers import setup_handlers
 from datetime import datetime, timedelta
 from database import Session, User, init_db, get_all_users, delete_user_profile, validate_and_fix_subscription_date
@@ -72,20 +72,24 @@ async def update_admins_status():
 
 async def setup_bot_commands(bot: Bot):
     """Регистрация команд бота в меню Telegram"""
-    from aiogram.types import BotCommand
-    
-    commands = [
+    user_commands = [
         BotCommand(command="start", description="🚀 Запуск бота"),
         BotCommand(command="menu", description="📋 Главное меню"),
         BotCommand(command="renew", description="💵 Продлить подписку"),
         BotCommand(command="connect", description="✅ Подключить VPN"),
         BotCommand(command="stats", description="📊 Статистика"),
         BotCommand(command="help", description="ℹ️ Справка"),
-        BotCommand(command="orders", description="🧾 Заказы на проверку (админ)"),
     ]
-    
+    admin_commands = [
+        *user_commands,
+        BotCommand(command="orders", description="🧾 Заказы на проверку"),
+    ]
+
     try:
-        await bot.set_my_commands(commands)
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        for admin_id in config.ADMINS:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
         logger.info("✅ Bot commands registered successfully")
     except Exception as e:
         logger.error(f"❌ Failed to register bot commands: {e}")
