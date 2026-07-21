@@ -369,3 +369,30 @@ async def approve_order(order_uuid: str, admin_telegram_id: int):
         order.verified_by = admin_telegram_id
         session.commit()
         return order
+
+
+# ─── Legacy helpers (used by app.py) ───────────────────────────────────────
+
+async def delete_user_profile(telegram_id: int):
+    with Session() as session:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if user:
+            user.vless_profile_data = None
+            user.notified = False
+            session.commit()
+
+async def update_subscription(telegram_id: int, months: int):
+    with Session() as session:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if user:
+            now = datetime.utcnow()
+            user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
+            if user.subscription_end > now:
+                user.subscription_end += timedelta(days=months * 30)
+            else:
+                user.subscription_end = now + timedelta(days=months * 30)
+            user.subscription_end = validate_and_fix_subscription_date(user.subscription_end)
+            user.notified = False
+            session.commit()
+            return True
+        return False
