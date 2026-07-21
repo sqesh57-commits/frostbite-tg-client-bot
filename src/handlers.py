@@ -648,40 +648,7 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     with Session() as session:
         user = session.query(User).filter_by(id=order.user_id).first()
 
-    xui_updated = False
-    xui_update_error = None
-    if user:
-        try:
-            profile_data = safe_json_loads(user.vless_profile_data, default={})
-            email, _client = await resolve_existing_xui_client(user, profile_data)
-            expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-
-            if email:
-                xui_updated = await update_client_expiry(email, expiry_time)
-                if xui_updated and isinstance(profile_data, dict):
-                    profile_data["email"] = email
-                    save_user_profile_data(user.telegram_id, profile_data)
-                if not xui_updated:
-                    xui_update_error = f"3x-ui не подтвердил обновление клиента {email}"
-            elif profile_data:
-                logger.warning(
-                    "Stored profile for user %s is missing in 3x-ui during approval; recreating",
-                    user.telegram_id,
-                )
-                new_profile_data = await create_vless_profile(user.telegram_id, expiry_time, user.username)
-                if new_profile_data:
-                    save_user_profile_data(user.telegram_id, new_profile_data)
-                    xui_updated = True
-                    xui_update_error = None
-                else:
-                    save_user_profile_data(user.telegram_id, None)
-                    xui_update_error = "клиент удален из 3x-ui, пересоздать профиль не удалось"
-            else:
-                xui_update_error = "у пользователя еще нет созданного клиента 3x-ui"
-        except Exception as e:
-            xui_update_error = str(e)
-            logger.error(f"Failed to update expiry time in 3x-ui: {e}")
-
+    # approve_order already renewed via VPNService
     if user:
         await bot.send_message(
             user.telegram_id,
@@ -690,20 +657,13 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
             parse_mode='Markdown'
         )
 
-    admin_result_text = (
+    await callback.message.edit_text(
         "✅ **Заказ подтвержден**\n\n"
         f"ID: `{order.order_uuid}`\n"
         f"Код: `{order.payment_code}`\n"
         f"Тариф: `{get_order_tariff_label(order)}`\n"
-        f"Сумма: `{order.amount}` ₽"
-    )
-    if xui_updated:
-        admin_result_text += "\nПанель 3x-ui: `продлено`"
-    elif xui_update_error:
-        admin_result_text += f"\n⚠️ Панель 3x-ui: `{xui_update_error}`"
-
-    await callback.message.edit_text(
-        admin_result_text,
+        f"Сумма: `{order.amount}` ₽\n"
+        "Панель 3x-ui: `продлено`",
         parse_mode='Markdown'
     )
 
