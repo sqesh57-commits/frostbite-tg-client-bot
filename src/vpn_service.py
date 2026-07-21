@@ -163,11 +163,15 @@ class VPNService:
                 save_profile(profile)
                 return True
 
-            # Update in 3x-ui — API requires email in body
-            success = await self._api.update_client(profile.xui_email, {
-                "email": profile.xui_email,
-                "expiryTime": new_end_ms,
-            })
+            # Update in 3x-ui — API replaces full object, must send all fields
+            # Extract full client payload from API response
+            client_payload = self._api._extract_client_payload(client)
+            if not client_payload:
+                logger.error(f"Cannot extract client payload for {profile.xui_email}")
+                return False
+
+            client_payload["expiryTime"] = new_end_ms
+            success = await self._api.update_client(profile.xui_email, client_payload)
             if not success:
                 logger.error(f"Failed to update expiry for {profile.xui_email}")
                 return False
@@ -239,10 +243,16 @@ class VPNService:
         if not profile.xui_email:
             return False
 
-        success = await self._api.update_client(profile.xui_email, {
-            "email": profile.xui_email,
-            "enable": False,
-        })
+        client = await self._api.get_client(profile.xui_email)
+        if not client:
+            return False
+
+        client_payload = self._api._extract_client_payload(client)
+        if not client_payload:
+            return False
+
+        client_payload["enable"] = False
+        success = await self._api.update_client(profile.xui_email, client_payload)
         if success:
             profile.status = 'disabled'
             save_profile(profile)
