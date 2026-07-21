@@ -20,6 +20,7 @@ class Config(BaseModel):
     XUI_HOST: str = os.getenv("XUI_HOST", "your-server.com")
     XUI_SERVER_NAME: str = os.getenv("XUI_SERVER_NAME", "domain.com")
     XUI_VERIFY_SSL: bool = Field(default=os.getenv("XUI_VERIFY_SSL", "True").lower() == "true")
+    XUI_REQUEST_TIMEOUT_SECONDS: int = Field(default=int(os.getenv("XUI_REQUEST_TIMEOUT_SECONDS", "20")))
     PAYMENT_TOKEN: str = os.getenv("PAYMENT_TOKEN", "")
     PAYMENT_CARD_NUMBER: str = os.getenv("PAYMENT_CARD_NUMBER", "")
     PAYMENT_CARD_HOLDER: str = os.getenv("PAYMENT_CARD_HOLDER", "")

@@ -47,10 +47,12 @@ class XUIAPI:
     async def _ensure_session(self):
         if self.session is None:
             connector = aiohttp.TCPConnector(ssl=config.XUI_VERIFY_SSL)
+            timeout = aiohttp.ClientTimeout(total=config.XUI_REQUEST_TIMEOUT_SECONDS)
             self.session = aiohttp.ClientSession(
                 connector=connector,
                 cookie_jar=self.cookie_jar,
-                trust_env=True
+                trust_env=True,
+                timeout=timeout
             )
 
     def _build_url(self, endpoint: str) -> str:
