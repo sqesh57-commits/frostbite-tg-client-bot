@@ -4,7 +4,7 @@ import logging
 import coloredlogs
 from config import config
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, PreCheckoutQuery
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault, PreCheckoutQuery
 from handlers import setup_handlers
 from datetime import datetime, timedelta
 from database import Session, User, init_db, get_all_users, delete_user_profile, validate_and_fix_subscription_date
@@ -86,6 +86,7 @@ async def setup_bot_commands(bot: Bot):
     ]
 
     try:
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
         await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
         for admin_id in config.ADMINS:
             await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))

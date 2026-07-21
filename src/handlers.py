@@ -30,8 +30,12 @@ MAX_MESSAGE_LENGTH = 4096
 profile_create_attempts: dict[int, float] = {}
 
 
+def is_admin_telegram_id(telegram_id: int) -> bool:
+    return telegram_id in config.ADMINS
+
+
 def is_profile_create_admin(user: User) -> bool:
-    return bool(user.is_admin) or user.telegram_id in config.ADMINS
+    return bool(user.is_admin) or is_admin_telegram_id(user.telegram_id)
 
 
 def validate_profile_create(user: User) -> tuple[bool, str | None, str | None]:
@@ -197,6 +201,7 @@ async def start_cmd(message: Message, bot: Bot):
             telegram_id=message.from_user.id,
             full_name=message.from_user.full_name,
             username=message.from_user.username,
+            is_admin=is_admin_telegram_id(message.from_user.id),
         )
         await message.answer(
             f"Добро пожаловать в VPN бота `{(await bot.get_me()).full_name}`!\n"
@@ -210,6 +215,7 @@ async def start_cmd(message: Message, bot: Bot):
             db_user = session.query(User).get(user.id)
             for key, value in update_data.items():
                 setattr(db_user, key, value)
+            db_user.is_admin = is_admin_telegram_id(db_user.telegram_id)
             session.commit()
 
     await show_menu(bot, message.from_user.id)
@@ -233,6 +239,7 @@ async def menu_cmd(message: Message, bot: Bot):
             db_user = session.query(User).get(user.id)
             for key, value in update_data.items():
                 setattr(db_user, key, value)
+            db_user.is_admin = is_admin_telegram_id(db_user.telegram_id)
             session.commit()
 
     await show_menu(bot, message.from_user.id)
@@ -602,14 +609,20 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
     with Session() as session:
         user = session.query(User).filter_by(id=order.user_id).first()
 
-    if user and user.vless_profile_data:
+    xui_updated = False
+    xui_update_error = None
+    if user:
         try:
-            profile_data = safe_json_loads(user.vless_profile_data, default={})
-            email = profile_data.get("email")
-            if email:
+            email = get_order_client_name(user)
+            if email and email != "—":
                 expiry_time = get_safe_expiry_timestamp(user.subscription_end)
-                await update_client_expiry(email, expiry_time)
+                xui_updated = await update_client_expiry(email, expiry_time)
+                if not xui_updated:
+                    xui_update_error = f"3x-ui не подтвердил обновление клиента {email}"
+            else:
+                xui_update_error = "не удалось определить имя клиента 3x-ui"
         except Exception as e:
+            xui_update_error = str(e)
             logger.error(f"Failed to update expiry time in 3x-ui: {e}")
 
     if user:
@@ -620,12 +633,20 @@ async def admin_approve_order(callback: CallbackQuery, bot: Bot):
             parse_mode='Markdown'
         )
 
-    await callback.message.edit_text(
+    admin_result_text = (
         "✅ **Заказ подтвержден**\n\n"
         f"ID: `{order.order_uuid}`\n"
         f"Код: `{order.payment_code}`\n"
         f"Тариф: `{get_order_tariff_label(order)}`\n"
-        f"Сумма: `{order.amount}` ₽",
+        f"Сумма: `{order.amount}` ₽"
+    )
+    if xui_updated:
+        admin_result_text += "\nПанель 3x-ui: `продлено`"
+    elif xui_update_error:
+        admin_result_text += f"\n⚠️ Панель 3x-ui: `{xui_update_error}`"
+
+    await callback.message.edit_text(
+        admin_result_text,
         parse_mode='Markdown'
     )
 
