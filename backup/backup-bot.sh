@@ -163,12 +163,26 @@ EOF
 
 log "[INFO] Creating archive: $ARCHIVE_PATH"
 
+# Dump database to SQL
+DB_DUMP="${BACKUP_DIR}/users-db-dump.sql"
+if docker exec "$CONTAINER_NAME" test -f /app/data/users.db 2>/dev/null; then
+  log "[INFO] Dumping database to SQL..."
+  docker exec "$CONTAINER_NAME" sqlite3 /app/data/users.db .dump > "$DB_DUMP" 2>/dev/null || true
+fi
+
+# Copy DB file directly
+DB_COPY="${BACKUP_DIR}/users.db"
+if docker exec "$CONTAINER_NAME" test -f /app/data/users.db 2>/dev/null; then
+  log "[INFO] Copying database file..."
+  docker cp "$CONTAINER_NAME:/app/data/users.db" "$DB_COPY" 2>/dev/null || true
+fi
+
 tar \
   --exclude='__pycache__' \
   --exclude='.git' \
   --exclude='*.pyc' \
   --exclude='data/' \
-  --exclude='*.db' \
+  
   --exclude='.mimocode' \
   --exclude='*.log' \
   --exclude='*.tmp' \
@@ -184,7 +198,7 @@ tar \
   reset_db.sh \
   3X-UI\ Panel\ API.postman_collection.json \
   api.txt \
-  -C "$BACKUP_DIR" "$RESTORE_INFO" \
+  -C "$BACKUP_DIR" "$RESTORE_INFO" "$DB_DUMP" "$DB_COPY" \
   2>/tmp/bot-backup-tar-error.log
 
 [ "$?" -ne 0 ] && { cat /tmp/bot-backup-tar-error.log; fail "tar archive creation failed"; }
