@@ -156,22 +156,80 @@ async def sync_profile_state_with_xui(user: User, profile_data: dict | None) -> 
     save_user_profile_data(user.telegram_id, None)
     return {}, None
 
-def format_user_stats(stats: dict) -> str:
+def format_user_stats(stats: dict, subscription_end: datetime | None = None) -> str:
+    def traffic_to_int(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def format_traffic(value: int) -> str:
+        value = traffic_to_int(value)
         megabytes = value / 1024 / 1024
         if megabytes < 1024:
             return f"{megabytes:.2f} MB"
         return f"{megabytes / 1024:.2f} GB"
 
+    def format_expiry(stats_expiry, fallback: datetime | None) -> str:
+        try:
+            expiry_ms = int(stats_expiry or 0)
+        except (TypeError, ValueError):
+            expiry_ms = 0
+
+        if expiry_ms > 0:
+            if expiry_ms > 10_000_000_000:
+                expiry_ms = expiry_ms // 1000
+            return datetime.utcfromtimestamp(expiry_ms).strftime("%d-%m-%Y %H:%M")
+
+        if fallback:
+            return fallback.strftime("%d-%m-%Y %H:%M")
+        return "Без ограничения"
+
     upload = format_traffic(stats.get('upload', 0))
     download = format_traffic(stats.get('download', 0))
+    total = format_traffic(traffic_to_int(stats.get('upload', 0)) + traffic_to_int(stats.get('download', 0)))
+    expiry = format_expiry(stats.get('expiry_time'), subscription_end)
+    status = "✅ Включен" if stats.get('enable', True) else "⛔ Отключен"
+
+    inbounds = stats.get("inbounds") or []
+    if inbounds:
+        inbound_lines = []
+        for inbound in inbounds:
+            details = [f"ID {inbound.get('id')}"]
+            if inbound.get("protocol"):
+                details.append(str(inbound["protocol"]))
+            if inbound.get("port"):
+                details.append(f":{inbound['port']}")
+            inbound_lines.append(f"• `{inbound.get('remark', 'Inbound')}` ({', '.join(details)})")
+        inbound_text = "\n".join(inbound_lines)
+    else:
+        inbound_text = "`Нет данных`"
 
     return (
         "📊 **Ваша статистика:**\n\n"
-        f"🔼 Загружено: `{upload}`\n"
+        f"Статус профиля: `{status}`\n"
+        f"Дата окончания подписки: `{expiry}`\n\n"
+        f"🔼 Передано: `{upload}`\n"
         f"🔽 Скачано: `{download}`\n"
+        f"📦 Всего трафика: `{total}`\n\n"
+        "Доступные inbound:\n"
+        f"{inbound_text}"
     )
 
+
+
+async def resolve_stats_profile(user: User) -> tuple[str | None, datetime | None, str | None]:
+    """Resolve a 3x-ui email for stats from both new and legacy profile storage."""
+    _, profile = await get_profile_by_user(user.telegram_id)
+    if profile and profile.xui_email:
+        return profile.xui_email, profile.subscription_end or user.subscription_end, None
+
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    profile_data, email = await sync_profile_state_with_xui(user, profile_data)
+    if email:
+        return email, user.subscription_end, None
+
+    return None, user.subscription_end, "⚠️ Профиль не найден в 3x-ui. Нажмите «Подключить», чтобы создать его заново."
 
 def get_order_user(order) -> User | None:
     with Session() as session:
@@ -448,23 +506,23 @@ async def stats_cmd(message: Message, bot: Bot):
         await message.answer("⚠️ Профиль не создан")
         return
 
-    _, profile = await get_profile_by_user(user.telegram_id)
-    if not profile or not profile.xui_email:
-        await message.answer("⚠️ Профиль не создан")
+    loading_message = await message.answer("⚙️ Загружаем вашу статистику...")
+    email, subscription_end, error_text = await resolve_stats_profile(user)
+    if not email:
+        await loading_message.edit_text(error_text or "⚠️ Профиль не создан")
         return
 
-    await message.answer("⚙️ Загружаем вашу статистику...")
-    stats = await get_user_stats(profile.xui_email)
+    stats = await get_user_stats(email)
     if not stats:
-        await message.answer("⚠️ Не удалось получить статистику. Попробуйте позже")
+        await loading_message.edit_text("⚠️ Не удалось получить статистику. Попробуйте позже")
         return
 
-    text = format_user_stats(stats)
+    text = format_user_stats(stats, subscription_end)
 
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ В меню", callback_data="back_to_menu")
 
-    await message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+    await loading_message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
 
 @router.message(Command("help"))
 async def help_cmd(message: Message, bot: Bot):
@@ -908,14 +966,13 @@ async def connect_profile(callback: CallbackQuery):
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):
     user = await get_user(callback.from_user.id)
-    if not user or not user.vless_profile_data:
+    if not user:
         await callback.answer("⚠️ Профиль не создан")
         return
     await callback.message.edit_text("⚙️ Загружаем вашу статистику...")
-    profile_data = safe_json_loads(user.vless_profile_data, default={})
-    profile_data, email = await sync_profile_state_with_xui(user, profile_data)
+    email, subscription_end, error_text = await resolve_stats_profile(user)
     if not email:
-        await callback.message.edit_text("⚠️ Профиль не найден в 3x-ui. Нажмите «Подключить», чтобы создать его заново.")
+        await callback.message.edit_text(error_text or "⚠️ Профиль не создан")
         return
 
     stats = await get_user_stats(email)
@@ -924,7 +981,7 @@ async def user_stats(callback: CallbackQuery):
         return
 
     await callback.message.delete()
-    text = format_user_stats(stats)
+    text = format_user_stats(stats, subscription_end)
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     await callback.message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())

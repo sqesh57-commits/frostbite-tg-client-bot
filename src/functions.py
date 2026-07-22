@@ -268,18 +268,71 @@ class XUIAPI:
 
     # ─── Stats API ────────────────────────────────────────────────────────
 
+    async def get_inbounds_options(self) -> list:
+        data = await self.request_api("GET", "inbounds/options")
+        if data and data.get("success") and isinstance(data.get("obj"), list):
+            return data.get("obj", [])
+        return []
+
     async def get_user_stats(self, email: str):
-        data = await self.request_api("GET", f"clients/traffic/{quote(email, safe='')}")
-        if data and data.get("success"):
-            client_data = data.get("obj")
-            if isinstance(client_data, dict):
-                return {
-                    "upload": client_data.get("up", 0),
-                    "download": client_data.get("down", 0),
-                    "total": client_data.get("total", 0),
-                    "enable": client_data.get("enable", True),
-                }
-        return None
+        """Return enriched client statistics for the bot stats screen.
+
+        The traffic endpoint is fast but only returns counters. The client endpoint also
+        exposes expiry and attached inbound IDs, so use both and gracefully fall back
+        when one of the endpoints is unavailable on a particular 3x-ui version.
+        """
+        client_response = await self.get_client(email)
+        client = self._extract_client_payload(client_response) or {}
+        traffic = {}
+
+        if isinstance(client_response, dict):
+            response_traffic = client_response.get("traffic")
+            if isinstance(response_traffic, dict):
+                traffic = response_traffic
+
+        traffic_data = await self.request_api("GET", f"clients/traffic/{quote(email, safe='')}")
+        if traffic_data and traffic_data.get("success") and isinstance(traffic_data.get("obj"), dict):
+            traffic = {**traffic, **traffic_data.get("obj", {})}
+
+        if not client and not traffic:
+            return None
+
+        inbound_ids = []
+        if isinstance(client_response, dict) and isinstance(client_response.get("inboundIds"), list):
+            inbound_ids = client_response.get("inboundIds", [])
+
+        inbound_options = await self.get_inbounds_options()
+        inbound_by_id = {item.get("id"): item for item in inbound_options if isinstance(item, dict)}
+        inbounds = []
+        for inbound_id in inbound_ids:
+            inbound_info = inbound_by_id.get(inbound_id) or {"id": inbound_id}
+            inbounds.append({
+                "id": inbound_id,
+                "remark": inbound_info.get("remark") or inbound_info.get("tag") or f"Inbound {inbound_id}",
+                "protocol": inbound_info.get("protocol", ""),
+                "port": inbound_info.get("port", ""),
+            })
+
+        if not inbounds and inbound_options:
+            configured_ids = config.INBOUND_IDS if config.INBOUND_IDS else [config.INBOUND_ID]
+            for inbound_id in configured_ids:
+                inbound_info = inbound_by_id.get(inbound_id)
+                if inbound_info:
+                    inbounds.append({
+                        "id": inbound_id,
+                        "remark": inbound_info.get("remark") or inbound_info.get("tag") or f"Inbound {inbound_id}",
+                        "protocol": inbound_info.get("protocol", ""),
+                        "port": inbound_info.get("port", ""),
+                    })
+
+        return {
+            "upload": traffic.get("up", client.get("up", 0)) or 0,
+            "download": traffic.get("down", client.get("down", 0)) or 0,
+            "total": traffic.get("total", client.get("totalGB", client.get("total", 0))) or 0,
+            "enable": traffic.get("enable", client.get("enable", True)),
+            "expiry_time": client.get("expiryTime") or traffic.get("expiryTime") or 0,
+            "inbounds": inbounds,
+        }
 
     async def get_online_users(self):
         data = await self.request_api("POST", "clients/onlines")
